@@ -1,0 +1,124 @@
+#version 430 core
+
+layout(local_size_x = 64) in;
+
+struct MobData {
+    vec4 pos;              // xyz=position, w=entityId (seed)
+    vec4 vanilla_intent;   // xyz=normalized vanilla direction, w=vanilla speed
+    vec4 danger_pos;       // xyz=danger position, w=dangerRange
+    vec4 personality;      // x=poiWeight, y=dangerWeight, z=idleWeight, w=speed (unused mostly now)
+    vec4 personality_ext;  // x=aggroRange, y=fleeThreshold, z=packBehavior, w=nightActivity
+    vec4 state;            // x=healthRatio, y=dayTime(0-1), z=lightLevel(0-15), w=lastHurtAge
+    vec4 state_ext;        // x=nearbyAllyCount, y=inWater, z=hasTarget, w=mobTypeId
+    vec4 reserved;         // padding
+};
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    MobData mobs[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    vec4 results[]; // xyz=adjustment direction, w=action_hint
+};
+
+uniform float time;
+uniform int mob_count;
+
+float hash(uint x) {
+    x = ((x >> 16) ^ x) * 0x45d9f3bU;
+    x = ((x >> 16) ^ x) * 0x45d9f3bU;
+    x = (x >> 16) ^ x;
+    return float(x) / 4294967295.0;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= uint(mob_count)) return;
+
+    MobData mob = mobs[id];
+    vec3 pos = mob.pos.xyz;
+    vec3 vanilla_dir = mob.vanilla_intent.xyz;
+    float vanilla_speed = mob.vanilla_intent.w;
+    float seed = hash(id + uint(mob.pos.w));
+
+    // If vanilla AI isn't moving, GPU shouldn't force movement.
+    if (dot(vanilla_dir, vanilla_dir) < 0.01 || vanilla_speed < 0.01) {
+        results[id] = vec4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    float dangerWeight   = mob.personality.y;
+    float idleWeight     = mob.personality.z;
+
+    float fleeThreshold  = mob.personality_ext.y;
+    float packBehavior   = mob.personality_ext.z;
+    float nightActivity  = mob.personality_ext.w;
+
+    float healthRatio    = mob.state.x;
+    float dayTime        = mob.state.y;
+    float lightLevel     = mob.state.z;
+    float lastHurtAge    = mob.state.w;
+
+    float allyCount      = mob.state_ext.x;
+    float inWater        = mob.state_ext.y;
+
+    float isNight = smoothstep(0.25, 0.55, dayTime) * (1.0 - smoothstep(0.9, 1.0, dayTime));
+    
+    vec3 adjustment = vec3(0.0);
+    float action_hint = 0.0; // 0=default, 1=environment, 2=pack, 3=danger/alert
+
+    // 1. Light avoidance (environment)
+    // Nocturnal mobs slightly steer away from bright areas
+    if (nightActivity > 0.0 && isNight > 0.5 && lightLevel > 11.0) {
+        // Simple heuristic: wander offset based on seed to simulate confusion/avoidance
+        vec3 light_avoid = vec3(sin(seed * 6.28), 0.0, cos(seed * 6.28));
+        adjustment += light_avoid * 0.5 * nightActivity;
+        action_hint = 1.0;
+    }
+
+    // 2. Pack cohesion (pack)
+    if (packBehavior > 0.0 && allyCount > 1.0) {
+        // Simulate tendency to move similarly to others or just group up slightly
+        // We don't have all allies' positions, so we add a slow sinusoidal drift shared by seed parity
+        float group_phase = time * 0.001 + (float(id % 3) * 2.0);
+        vec3 pack_drift = vec3(cos(group_phase), 0.0, sin(group_phase));
+        adjustment += pack_drift * 0.3 * packBehavior;
+        action_hint = 2.0;
+    }
+
+    // 3. Danger / Fleeing (danger)
+    float dist_to_danger = distance(pos, mob.danger_pos.xyz);
+    if (dangerWeight > 0.0 && dist_to_danger < 16.0) {
+        vec3 flee_dir = normalize(pos - mob.danger_pos.xyz);
+        
+        float danger_stress = exp(-dist_to_danger * 0.2) * dangerWeight;
+        
+        // HP panic multiplier
+        float fleePanic = step(0.01, fleeThreshold) * smoothstep(fleeThreshold, fleeThreshold * 0.3, healthRatio) * 2.0;
+        
+        // Hurt panic
+        float hurtPanic = exp(-lastHurtAge * 0.05);
+
+        adjustment += flee_dir * (danger_stress + fleePanic + hurtPanic) * 0.8;
+        if ((danger_stress + fleePanic + hurtPanic) > 0.5) {
+            action_hint = 3.0;
+        }
+    }
+
+    // 4. Idle variation (flavor) - Removed
+    // Vanilla AI handles random wandering (RandomStrollGoal) perfectly well.
+    // Adding shifting sinusoidal drift to the vanilla walking vector causes mobs to spin in circles.
+    // If no environmental factors (danger, pack, light) are active, adjustment remains vec3(0.0).
+
+    // Combine and normalize adjustment
+    // Note: The CPU side will blend this `adjustment` with the `vanilla_dir`.
+    // We normalize the adjustment here so the Java side knows the pure direction of the GPU influence.
+    float adj_len2 = dot(adjustment, adjustment);
+    if (adj_len2 > 1e-6) {
+        adjustment *= inversesqrt(adj_len2);
+    } else {
+        adjustment = vec3(0.0);
+    }
+
+    results[id] = vec4(adjustment, action_hint);
+}

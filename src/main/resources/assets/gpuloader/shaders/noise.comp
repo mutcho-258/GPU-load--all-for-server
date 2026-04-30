@@ -1,0 +1,218 @@
+#version 430 core
+#ifndef LOCAL_SIZE
+#define LOCAL_SIZE 256
+#endif
+
+layout(local_size_x = LOCAL_SIZE) in;
+
+layout(std430, binding = 0) readonly buffer PermutationBuffer {
+    int p[512];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    float output_data[];
+};
+
+// Biome Data SSBO (binding = 2)
+// Header: [biome_count, pad, pad, pad]
+// Body: BiomeEntry[biome_count], each 16 floats
+layout(std430, binding = 2) readonly buffer BiomeDataBuffer {
+    int biome_count;
+    int _bpad1, _bpad2, _bpad3;
+    float biome_entries[];  // biome_count * 16 floats
+};
+
+// Biome Output SSBO (binding = 3)
+layout(std430, binding = 3) writeonly buffer BiomeOutputBuffer {
+    int biome_ids[];
+};
+
+uniform int request_x[32];
+uniform int request_z[32];
+uniform float x_freq;
+uniform float y_freq;
+uniform float z_freq;
+uniform int width;
+uniform int height;
+uniform int depth;
+uniform int batch_size;
+uniform int enable_biome;  // 1 = biome determination enabled
+
+// --- Noise Functions ---
+
+float fade(float t) {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+float lerp(float t, float a, float b) {
+    return a + t * (b - a);
+}
+
+float grad(int hash, float x, float y, float z) {
+    int h = hash & 15;
+    float u = h < 8 ? x : y;
+    float v = h < 4 ? y : h == 12 || h == 14 ? x : z;
+    return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+}
+
+float perlin_noise(float x, float y, float z) {
+    int X = int(floor(x)) & 255;
+    int Y = int(floor(y)) & 255;
+    int Z = int(floor(z)) & 255;
+
+    x -= floor(x);
+    y -= floor(y);
+    z -= floor(z);
+
+    float u = fade(x);
+    float v = fade(y);
+    float w = fade(z);
+
+    int A = (p[X] + Y) & 255;
+    int AA = (p[A] + Z) & 255;
+    int AB = (p[(A + 1) & 255] + Z) & 255;
+
+    int B = (p[(X + 1) & 255] + Y) & 255;
+    int BA = (p[B] + Z) & 255;
+    int BB = (p[(B + 1) & 255] + Z) & 255;  
+
+    return lerp(w, lerp(v, lerp(u, grad(p[AA], x, y, z),
+                                     grad(p[BA], x - 1.0, y, z)),
+                             lerp(u, grad(p[AB], x, y - 1.0, z),
+                                   grad(p[BB], x - 1.0, y - 1.0, z))),
+                     lerp(v, lerp(u, grad(p[(AA + 1) & 255], x, y, z - 1.0),
+                                   grad(p[(BA + 1) & 255], x - 1.0, y, z - 1.0)),
+                           lerp(u, grad(p[(AB + 1) & 255], x, y - 1.0, z - 1.0),
+                                 grad(p[(BB + 1) & 255], x - 1.0, y - 1.0, z - 1.0))));
+}
+
+float fbm_custom(float x, float y, float z, float frequency_scale, int octaves) {
+    float total = 0.0;
+    float persistence = 0.5;
+    float amplitude = 1.0;
+    float current_freq = frequency_scale;
+    for (int i = 0; i < octaves; i++) {
+        total += perlin_noise(x * current_freq, y * current_freq, z * current_freq) * amplitude;
+        amplitude *= persistence;
+        current_freq *= 2.0;
+    }
+    return total;
+}
+
+// --- Biome Functions ---
+
+float paramDist(float val, float pmin, float pmax) {
+    if (val >= pmin && val <= pmax) return 0.0;
+    float d_min = val - pmin;
+    float d_max = val - pmax;
+    float abs_min = abs(d_min);
+    float abs_max = abs(d_max);
+    float closer = min(abs_min, abs_max);
+    return closer * closer;
+}
+shared float shared_biomes[4096]; // 256 biomes * 16 floats
+
+int findBiome(float temp, float humid, float cont, float eros, float weird, float dep) {
+    float minDist = 1.0e30;
+    int bestBiome = 0;
+
+    for (int i = 0; i < biome_count; i++) {
+        int base = i * 16;
+        float dist = 0.0;
+        dist += paramDist(temp,  shared_biomes[base + 0],  shared_biomes[base + 1]);
+        dist += paramDist(humid, shared_biomes[base + 2],  shared_biomes[base + 3]);
+        dist += paramDist(cont,  shared_biomes[base + 4],  shared_biomes[base + 5]);
+        dist += paramDist(eros,  shared_biomes[base + 6],  shared_biomes[base + 7]);
+        dist += paramDist(weird, shared_biomes[base + 8],  shared_biomes[base + 9]);
+        dist += paramDist(dep,   shared_biomes[base + 10], shared_biomes[base + 11]);
+        float offset = shared_biomes[base + 12];
+        dist += offset * offset;
+
+        if (dist < minDist) {
+            minDist = dist;
+            bestBiome = floatBitsToInt(shared_biomes[base + 13]);
+        }
+    }
+    return bestBiome;
+}
+
+
+void main() {
+    uint id2d = gl_GlobalInvocationID.x;
+    uint total_points2d = uint(width * depth * batch_size);
+    
+    // ワークグループ全体でバイオームデータを共有メモリにロード
+    // (SSBOへの同時アクセスを減らし、ループ内の読み取りを高速化)
+    if (enable_biome == 1 && biome_count > 0) {
+        int total_floats = biome_count * 16;
+        for (int i = int(gl_LocalInvocationIndex); i < total_floats; i += int(gl_WorkGroupSize.x)) {
+            if (i < 4096) {
+                shared_biomes[i] = biome_entries[i];
+            }
+        }
+    }
+    barrier(); // ロード完了を待機
+
+    if (id2d >= total_points2d) return;
+
+    // chunk_id, x, z mapping for 2D dispatch
+    int pointsPerChunk2D = width * depth;
+    int chunk_id = int(id2d / uint(pointsPerChunk2D));
+    int rem = int(id2d % uint(pointsPerChunk2D));
+    int z = rem / width;
+    int x = rem % width;
+
+    int world_x = request_x[chunk_id] + x * 4;
+    int world_z = request_z[chunk_id] + z * 4;
+
+    // --- 2D Noise calculation (Once per column) ---
+    // These parameters are effectively 2D in Minecraft's climate system.
+    float continentalness = fbm_custom(float(world_x), 0.0, float(world_z), 0.0002, 4);
+    float temperature_base = fbm_custom(float(world_x) + 1234.5, 0.0, float(world_z) - 5678.9, 0.0008, 4);
+    float humidity_base = fbm_custom(float(world_x) - 4321.0, 0.0, float(world_z) + 8765.4, 0.0008, 4);
+    float erosion = fbm_custom(float(world_x) + 999.0, 0.0, float(world_z) + 999.0, 0.002, 4);
+    float weirdness = fbm_custom(float(world_x) - 777.0, 0.0, float(world_z) - 777.0, 0.002, 4);
+    float depth_val = fbm_custom(float(world_x) + 2222.2, 0.0, float(world_z) + 3333.3, 0.0005, 4);
+
+    float clamped_cont = clamp(continentalness, -1.0, 1.0);
+    float clamped_eros = clamp(erosion, -1.0, 1.0);
+    float clamped_weird = clamp(weirdness, -1.0, 1.0);
+    float clamped_depth = clamp(depth_val, -1.0, 1.0);
+
+    // --- Vertical loop for 3D Noise & Biomes ---
+    for (int y = 0; y < height; y++) {
+        int world_y = y * 4;
+        float mid_height = float(height) * 0.5;
+        float vertical_gradient = (float(y) - mid_height) * 0.15;
+        
+        // Minor 3D adjustments to climate (optional but kept for fidelity)
+        float temperature = temperature_base - max(0.0, float(y) - mid_height) * 0.02;
+        float humidity = humidity_base - max(0.0, continentalness) * 0.1;
+        
+        // The core terrain density is 3D
+        float terrain_base = fbm_custom(float(world_x), float(world_y), float(world_z), 0.005, 4);
+        float terrain_density = (terrain_base * (1.0 - abs(erosion) * 0.5)) - vertical_gradient;
+
+        float clamped_temp = clamp(temperature, -1.0, 1.0);
+        float clamped_humid = clamp(humidity, -1.0, 1.0);
+
+        // Map back to the original 1D output buffer layout
+        // Layout: [batch][y][z][x]
+        uint voxel_id = uint(chunk_id * (width * height * depth) + y * (width * depth) + z * width + x);
+        uint output_idx = voxel_id * 7;
+        
+        output_data[output_idx + 0] = clamp(terrain_density, -2.0, 2.0);    // DENSITY
+        output_data[output_idx + 1] = clamped_temp;                          // TEMPERATURE
+        output_data[output_idx + 2] = clamped_humid;                         // HUMIDITY
+        output_data[output_idx + 3] = clamped_cont;                          // CONTINENTALNESS
+        output_data[output_idx + 4] = clamped_eros;                          // EROSION
+        output_data[output_idx + 5] = clamped_weird;                         // WEIRDNESS
+        output_data[output_idx + 6] = clamped_depth;                         // DEPTH
+
+        if (enable_biome == 1 && biome_count > 0) {
+            biome_ids[voxel_id] = findBiome(clamped_temp, clamped_humid, clamped_cont,
+                                             clamped_eros, clamped_weird, clamped_depth);
+        }
+    }
+}
+

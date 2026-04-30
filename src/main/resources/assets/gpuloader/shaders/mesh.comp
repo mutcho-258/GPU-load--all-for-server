@@ -1,0 +1,70 @@
+#version 430 core
+
+// 8x8x8 = 512 threads, covering 16x16x16 = 4096 blocks across 8 workgroups
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+// Input: opacity flags, 1 bit per block
+// 16x16x16 = 4096 blocks, packed into 4096/32 = 128 uints
+layout(std430, binding = 0) readonly buffer BlockOpacity {
+    uint opacity_flags[];
+};
+
+// Output: face visibility bitmask per block
+// 6 bits per block (one per face: +X,-X,+Y,-Y,+Z,-Z)
+// Packed: 4096 blocks, 1 uint per block (lower 6 bits used)
+layout(std430, binding = 1) writeonly buffer FaceMask {
+    uint face_masks[];
+};
+
+// Section dimensions (always 16x16x16 for Minecraft)
+uniform int section_size; // = 16
+
+// Helper: get opacity of block at local (x,y,z), returning 1 if opaque, 0 if transparent
+// Out-of-bounds returns 0 (transparent = face is visible from outside)
+uint getOpacity(int x, int y, int z) {
+    if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) {
+        return 0u; // outside section = transparent
+    }
+    int idx = y * 256 + z * 16 + x; // Y-major layout matching Minecraft
+    int wordIdx = idx / 32;
+    int bitIdx  = idx % 32;
+    return (opacity_flags[wordIdx] >> uint(bitIdx)) & 1u;
+}
+
+void main() {
+    // Each thread handles one block
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+
+    if (pos.x >= 16 || pos.y >= 16 || pos.z >= 16) return;
+
+    int blockIdx = pos.y * 256 + pos.z * 16 + pos.x;
+
+    // If the block itself is transparent, no faces need rendering from it
+    // (transparent blocks like glass/water render differently - skip here)
+    // We still compute neighbor visibility for adjacent opaque blocks.
+    uint selfOpaque = getOpacity(pos.x, pos.y, pos.z);
+
+    uint mask = 0u;
+
+    if (selfOpaque == 1u) {
+        // For each of the 6 faces, a face is VISIBLE if the neighbor is transparent
+        // Face bit layout: bit0=+X, bit1=-X, bit2=+Y, bit3=-Y, bit4=+Z, bit5=-Z
+
+        uint neighborPX = getOpacity(pos.x + 1, pos.y,     pos.z    ); // +X neighbor
+        uint neighborNX = getOpacity(pos.x - 1, pos.y,     pos.z    ); // -X neighbor
+        uint neighborPY = getOpacity(pos.x,     pos.y + 1, pos.z    ); // +Y neighbor
+        uint neighborNY = getOpacity(pos.x,     pos.y - 1, pos.z    ); // -Y neighbor
+        uint neighborPZ = getOpacity(pos.x,     pos.y,     pos.z + 1); // +Z neighbor
+        uint neighborNZ = getOpacity(pos.x,     pos.y,     pos.z - 1); // -Z neighbor
+
+        // Face visible = neighbor is NOT opaque (== 0)
+        mask |= ((1u - neighborPX) << 0u); // +X face
+        mask |= ((1u - neighborNX) << 1u); // -X face
+        mask |= ((1u - neighborPY) << 2u); // +Y face
+        mask |= ((1u - neighborNY) << 3u); // -Y face
+        mask |= ((1u - neighborPZ) << 4u); // +Z face
+        mask |= ((1u - neighborNZ) << 5u); // -Z face
+    }
+
+    face_masks[blockIdx] = mask;
+}

@@ -1,0 +1,88 @@
+#version 430 core
+#ifndef LOCAL_SIZE
+#define LOCAL_SIZE 256
+#endif
+
+layout(local_size_x = LOCAL_SIZE) in;
+
+// Input: Heightmap (1 int per column)
+layout(std430, binding = 0) readonly buffer HeightmapBuffer {
+    int height_data[];
+};
+
+// Input: Biome IDs (1 int per column, or quart resolution mapped to columns)
+layout(std430, binding = 1) readonly buffer BiomeBuffer {
+    int biome_data[];
+};
+
+// Output: Surface Rules (4 ints per column: top_id, under_id, depth, underwater_id)
+layout(std430, binding = 2) writeonly buffer SurfaceOutputBuffer {
+    int surface_data[];
+};
+
+uniform int batch_size;
+uniform int sea_level; // Usually 63
+
+// Basic Block IDs mapped to Java BlockStateRegistry
+const int ID_AIR = 0;
+const int ID_STONE = 1;
+const int ID_WATER = 2;
+const int ID_DIRT = 3;
+const int ID_GRASS_BLOCK = 4;
+const int ID_SAND = 5;
+const int ID_SANDSTONE = 6;
+const int ID_GRAVEL = 7;
+const int ID_DEEPSLATE = 8;
+const int ID_SNOW = 9;
+const int ID_ICE = 10;
+const int ID_TERRACOTTA = 11;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    uint total_points = 256 * uint(batch_size);
+
+    if (id >= total_points) return;
+
+    int y = height_data[id];
+    int biome_id = biome_data[id]; // For future biome specific logic
+
+    int top_id = ID_GRASS_BLOCK;
+    int under_id = ID_DIRT;
+    int depth = 3; // Default 3 blocks of dirt under grass
+    int underwater_id = ID_AIR;
+
+    // A very simple universal rule as a starting point.
+    if (y < sea_level - 1) {
+        // Underwater floor
+        top_id = ID_GRAVEL; // default deep ocean
+        under_id = ID_DIRT;
+        if (y > sea_level - 10) {
+            top_id = ID_SAND;
+            under_id = ID_SANDSTONE;
+        }
+        depth = 2;
+        underwater_id = ID_WATER; 
+    } else if (y == sea_level - 1) {
+        // Beach/Shore
+        top_id = ID_SAND;
+        under_id = ID_SANDSTONE;
+        depth = 3;
+    } else if (y >= 90) {
+        // Mountains
+        top_id = ID_SNOW;
+        under_id = ID_STONE;
+        depth = 1;
+    } else {
+        // Normal land
+        top_id = ID_GRASS_BLOCK;
+        under_id = ID_DIRT;
+        depth = 3;
+    }
+
+    // Write to 4-stride output array
+    uint out_idx = id * 4;
+    surface_data[out_idx + 0] = top_id;
+    surface_data[out_idx + 1] = under_id;
+    surface_data[out_idx + 2] = depth;
+    surface_data[out_idx + 3] = underwater_id;
+}

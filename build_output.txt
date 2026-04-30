@@ -1,0 +1,34 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.8/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+Java: 21.0.5, JVM: 21.0.5+11-LTS (Eclipse Adoptium), Arch: amd64
+
+> Task :compileJava
+D:\gemini\minecraft_forge\v1.20.1_forge\gpu-load\src\main\java\com\gpuloader\command\GPUCommand.java:3: エラー: パッケージcom.gpuloader.clは存在しません
+import com.gpuloader.cl.CLManager;
+                       ^
+D:\gemini\minecraft_forge\v1.20.1_forge\gpu-load\src\main\java\com\gpuloader\gl\NoiseComputeTask.java:25: エラー: パッケージcom.gpuloader.cl.NoiseBatchManagerは存在しません
+            List<com.gpuloader.cl.NoiseBatchManager.NoiseRequest> batch) {
+                                                   ^
+D:\gemini\minecraft_forge\v1.20.1_forge\gpu-load\src\main\java\com\gpuloader\command\GPUCommand.java:15: エラー: シンボルを見つけられません
+                    boolean cl = CLManager.isInitialized();
+                                 ^
+  シンボル:   変数 CLManager
+  場所: クラス GPUCommand
+エラー3個
+
+> Task :compileJava FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileJava'.
+> Compilation failed; see the compiler error output for details.
+
+* Try:
+> Run with --info option to get more log output.
+> Run with --scan to get full insights.
+
+BUILD FAILED in 9s
+1 actionable task: 1 executed
