@@ -136,12 +136,13 @@ repositories {
     // }
 }
 
-// Enable JarJar to embed LWJGL dependencies in the output JAR
-jarJar.enable()
+// We CANNOT use JarJar for LWJGL because it causes a JPMS split package crash on the client.
+// The client already provides LWJGL, and Forge will crash if it's bundled.
 
 // Separate configuration to resolve native JARs for extraction
 configurations {
     lwjglNatives
+    serverLibs
 }
 
 dependencies {
@@ -150,17 +151,17 @@ dependencies {
 
     def lwjgl_version = "3.3.1"
 
-    // LWJGL Core - Java API only in JarJar
+    // LWJGL Core - Java API (Provided by client, missing on vanilla server)
     implementation "org.lwjgl:lwjgl:${lwjgl_version}"
-    jarJar(group: 'org.lwjgl', name: 'lwjgl', version: "[${lwjgl_version}]")
+    serverLibs "org.lwjgl:lwjgl:${lwjgl_version}"
     
-    // LWJGL GLFW - Java API only in JarJar
+    // LWJGL GLFW - Java API
     implementation "org.lwjgl:lwjgl-glfw:${lwjgl_version}"
-    jarJar(group: 'org.lwjgl', name: 'lwjgl-glfw', version: "[${lwjgl_version}]")
+    serverLibs "org.lwjgl:lwjgl-glfw:${lwjgl_version}"
     
-    // LWJGL OpenGL - Java API only in JarJar
+    // LWJGL OpenGL - Java API
     implementation "org.lwjgl:lwjgl-opengl:${lwjgl_version}"
-    jarJar(group: 'org.lwjgl', name: 'lwjgl-opengl', version: "[${lwjgl_version}]")
+    serverLibs "org.lwjgl:lwjgl-opengl:${lwjgl_version}"
     
     // Natives - for dev environment runtime
     runtimeOnly "org.lwjgl:lwjgl:${lwjgl_version}:natives-windows"
@@ -193,8 +194,8 @@ tasks.register('extractLwjglNatives') {
                 from zipTree(nativeJar)
                 include '**/*.dll', '**/*.so', '**/*.dylib'
                 eachFile { fcp ->
-                    // Flatten: strip any subdirectory paths
-                    fcp.relativePath = new RelativePath(true, fcp.name)
+                    // Flatten and rename to .bundled to hide from classpath scanners
+                    fcp.relativePath = new RelativePath(true, fcp.name + ".bundled")
                 }
                 into outputDir
                 includeEmptyDirs = false
@@ -204,8 +205,27 @@ tasks.register('extractLwjglNatives') {
     }
 }
 
+// Extract server library jars as .disabled to avoid client module conflicts
+tasks.register('extractServerLibs') {
+    def outputDir = file("${buildDir}/resources/main/server-libs")
+    outputs.dir(outputDir)
+    
+    doLast {
+        outputDir.mkdirs()
+        configurations.serverLibs.files.each { libJar ->
+            copy {
+                from libJar
+                into outputDir
+                rename { String fileName -> fileName + ".disabled" }
+            }
+        }
+        logger.lifecycle("[GPU Loader] Packaged server libraries to ${outputDir}")
+    }
+}
+
 tasks.named('processResources').configure {
     dependsOn 'extractLwjglNatives'
+    dependsOn 'extractServerLibs'
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.
@@ -229,6 +249,7 @@ tasks.named('processResources', ProcessResources).configure {
 
 // Example for how to get properties into the manifest for reading at runtime.
 tasks.named('jar', Jar).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     manifest {
         attributes([
                 'Specification-Title'     : mod_id,

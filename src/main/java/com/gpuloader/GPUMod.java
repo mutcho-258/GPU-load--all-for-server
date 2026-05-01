@@ -113,6 +113,17 @@ public class GPUMod {
             if (!initialized) {
                 LOGGER.info("GPU Acceleration Mod: Initializing GPU Infrastructure on Dedicated Server");
 
+                // Step 0: Check and extract server libraries (.jar)
+                boolean libsExtracted = com.gpuloader.core.ServerLibExtractor.extractLibs();
+                if (libsExtracted) {
+                    LOGGER.error("=========================================================");
+                    LOGGER.error("[GPU Loader] Missing Server Libraries have been extracted.");
+                    LOGGER.error("[GPU Loader] YOU MUST RESTART THE SERVER NOW TO LOAD THEM.");
+                    LOGGER.error("=========================================================");
+                    System.exit(0);
+                    return;
+                }
+
                 // Step 1: Extract native libraries (.dll/.so) from mod JAR if needed
                 // This MUST happen before any LWJGL class is loaded/initialized
                 boolean nativesReady = com.gpuloader.gl.NativeExtractor.extractAndConfigure();

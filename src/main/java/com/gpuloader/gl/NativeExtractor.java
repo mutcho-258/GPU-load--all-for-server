@@ -80,8 +80,8 @@ public class NativeExtractor {
         for (String nativeFile : nativeFiles) {
             Path targetFile = extractDir.resolve(nativeFile);
             
-            // JAR内リソースパス: /natives/<filename>
-            String resourcePath = "/natives/" + nativeFile;
+            // JAR内リソースパス: /natives/<filename>.bundled
+            String resourcePath = "/natives/" + nativeFile + ".bundled";
             
             try (InputStream in = NativeExtractor.class.getResourceAsStream(resourcePath)) {
                 if (in == null) {
