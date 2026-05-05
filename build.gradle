@@ -148,6 +148,9 @@ configurations {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+    
+    // 共通APIプロジェクトへの依存
+    implementation project(':gpu-load-API')
 
     def lwjgl_version = "3.3.1"
 

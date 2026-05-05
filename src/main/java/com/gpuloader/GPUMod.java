@@ -23,6 +23,9 @@ public class GPUMod {
     private static volatile boolean biomeUploadPending = false;
 
     public GPUMod(FMLJavaModLoadingContext context) {
+        // Register API implementation
+        com.gpuloader.api.GPULoaderAPI.registerInternal(com.gpuloader.core.GPUComputeManager.getInstance());
+
         IEventBus modEventBus = context.getModEventBus();
 
         // Register the commonSetup method for modloading

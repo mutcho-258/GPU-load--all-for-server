@@ -4,7 +4,9 @@ import com.mojang.logging.LogUtils;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL20;
 import org.lwjgl.opengl.GL30;
+import org.lwjgl.opengl.GL41;
 import org.lwjgl.opengl.GL43;
+import org.lwjgl.BufferUtils;
 import org.slf4j.Logger;
 
 import java.io.InputStream;
@@ -16,12 +18,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import org.lwjgl.opengl.GL11;
-import org.lwjgl.opengl.GL20;
-import org.lwjgl.opengl.GL30;
-import org.lwjgl.opengl.GL41;
-import org.lwjgl.opengl.GL43;
-import org.lwjgl.BufferUtils;
 import net.minecraftforge.fml.loading.FMLPaths;
 
 public class GLShaderManager {
@@ -132,6 +128,39 @@ public class GLShaderManager {
 
     public static boolean isSupported() {
         return supportsCompute;
+    }
+
+    /**
+     * シェーダーソースにdefineマクロを注入してからコンパイルします。
+     * @param name プログラム名
+     * @param source シェーダーソースコード
+     * @param defines #defineマクロのMap（名前→値）。値がnullの場合は値なしのフラグとして定義。
+     * @param injectLocalSize LOCAL_SIZEを自動注入するかどうか
+     * @return プログラムID。失敗時は-1
+     */
+    public static int createComputeProgram(String name, String source, Map<String, String> defines, boolean injectLocalSize) {
+        if (defines != null && !defines.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> entry : defines.entrySet()) {
+                sb.append("#define ").append(entry.getKey());
+                if (entry.getValue() != null) {
+                    sb.append(" ").append(entry.getValue());
+                }
+                sb.append("\n");
+            }
+            // #version行の直後にdefineを挿入
+            int versionEnd = source.indexOf('\n');
+            if (versionEnd != -1) {
+                source = source.substring(0, versionEnd + 1) + sb + source.substring(versionEnd + 1);
+            } else {
+                source = sb + source;
+            }
+        }
+        if (injectLocalSize) {
+            source = source.replaceFirst("#version 430 core",
+                    "#version 430 core\n#define LOCAL_SIZE " + optimalLocalSize);
+        }
+        return createComputeProgram(name, source);
     }
 
     public static int createComputeProgram(String name, String source) {
@@ -285,6 +314,16 @@ public class GLShaderManager {
         if (program != null) {
             GL20.glUseProgram(program);
         }
+    }
+
+    /**
+     * 登録済みシェーダープログラムのOpenGL IDを取得します。
+     * @param name プログラム名
+     * @return プログラムID。未登録の場合は-1
+     */
+    public static int getProgram(String name) {
+        Integer program = PROGRAMS.get(name);
+        return program != null ? program : -1;
     }
 
     public static void cleanup() {
