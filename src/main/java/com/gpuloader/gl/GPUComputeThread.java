@@ -112,6 +112,7 @@ public class GPUComputeThread extends Thread {
             
             // 完了したバッチの読み戻しを常にチェック（タスク実行後も、待機前も）
             com.gpuloader.gl.NoiseComputeTask.processReadyBatches();
+            com.gpuloader.gl.MobAiTask.processReadyBatches();
 
             if (task == null) {
                 synchronized (lock) {

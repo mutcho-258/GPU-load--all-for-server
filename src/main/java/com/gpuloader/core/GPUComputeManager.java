@@ -98,6 +98,11 @@ public class GPUComputeManager implements IGPUComputeAPI {
         return GLShaderManager.isIntegratedGPU();
     }
 
+    @Override
+    public com.gpuloader.api.IPersistentBuffer createPersistentBuffer(int inputCapacity, int outputCapacity) {
+        return new com.gpuloader.gl.PersistentBufferImpl(inputCapacity, outputCapacity);
+    }
+
     /**
      * キューに溜まったタスクをレンダースレッド上で順次実行する。
      * GPUMod の TickEvent から呼ぶこと。

@@ -58,7 +58,12 @@ public class NoiseComputeTask extends GPUTask<Void> {
     private static final int POOL_SIZE = 32;
 
     private static int permBuffer = -1;
+    private static ByteBuffer persistentPermBuf = null;
     private static int noiseProgram = -1;
+    
+    // Uniform arrays cache
+    private static final int[] cachedReqX = new int[32];
+    private static final int[] cachedReqZ = new int[32];
     
     // Uniform locations cache
     private static int loc_request_x = -1;
@@ -126,14 +131,12 @@ public class NoiseComputeTask extends GPUTask<Void> {
 
         GL20.glUseProgram(noiseProgram);
 
-        int[] reqX = new int[32];
-        int[] reqZ = new int[32];
         for (int i = 0; i < batchSize; i++) {
-            reqX[i] = batchRequests.get(i).chunkX * 16;
-            reqZ[i] = batchRequests.get(i).chunkZ * 16;
+            cachedReqX[i] = batchRequests.get(i).chunkX * 16;
+            cachedReqZ[i] = batchRequests.get(i).chunkZ * 16;
         }
-        GL20.glUniform1iv(loc_request_x, reqX);
-        GL20.glUniform1iv(loc_request_z, reqZ);
+        GL20.glUniform1iv(loc_request_x, cachedReqX);
+        GL20.glUniform1iv(loc_request_z, cachedReqZ);
         GL20.glUniform1i(loc_width, width);
         GL20.glUniform1i(loc_height, height);
         GL20.glUniform1i(loc_depth, depth);
@@ -305,14 +308,15 @@ public class NoiseComputeTask extends GPUTask<Void> {
         if (permBuffer == -1) {
             permBuffer = GL15.glGenBuffers();
             GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, permBuffer);
-            GL15.glBufferData(GL43.GL_SHADER_STORAGE_BUFFER, 512L * Integer.BYTES, GL15.GL_DYNAMIC_DRAW);
+            
+            int storageFlags = GL44.GL_MAP_WRITE_BIT | GL44.GL_MAP_PERSISTENT_BIT | GL44.GL_MAP_COHERENT_BIT;
+            GL44.glBufferStorage(GL43.GL_SHADER_STORAGE_BUFFER, 512L * Integer.BYTES, storageFlags);
+            persistentPermBuf = GL30.glMapBufferRange(GL43.GL_SHADER_STORAGE_BUFFER, 0, 512L * Integer.BYTES, storageFlags);
         }
 
-        if (currentPerm != null) {
-            GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, permBuffer);
-            IntBuffer p = BufferUtils.createIntBuffer(512);
-            p.put(currentPerm).flip();
-            GL15.glBufferSubData(GL43.GL_SHADER_STORAGE_BUFFER, 0, p);
+        if (currentPerm != null && persistentPermBuf != null) {
+            persistentPermBuf.clear();
+            persistentPermBuf.asIntBuffer().put(currentPerm);
         }
         GL32.glBindBufferBase(GL43.GL_SHADER_STORAGE_BUFFER, 0, permBuffer);
     }
@@ -329,8 +333,11 @@ public class NoiseComputeTask extends GPUTask<Void> {
         PBO_POOL.clear();
         PENDING_QUEUE.clear();
         if (permBuffer != -1) {
+            GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, permBuffer);
+            GL15.glUnmapBuffer(GL43.GL_SHADER_STORAGE_BUFFER);
             GL15.glDeleteBuffers(permBuffer);
             permBuffer = -1;
+            persistentPermBuf = null;
         }
         noiseProgram = -1;
     }

@@ -102,11 +102,6 @@ public class GPUMod {
         com.gpuloader.core.NoiseBatchManager.clearCache();
         com.gpuloader.core.BiomeParameterExtractor.clear();
         com.gpuloader.core.BiomeResultCache.clear();
-        // Only call GPU cleanup if GPU was actually initialized
-        if (initialized) {
-            com.gpuloader.gl.BiomeGPUBuffer.cleanup();
-            com.gpuloader.gl.GPUComputeThread.shutdown();
-        }
         biomeUploadPending = false;
     }
 
@@ -154,6 +149,16 @@ public class GPUMod {
     }
 
     @SubscribeEvent
+    public void onServerStopping(net.minecraftforge.event.server.ServerStoppingEvent event) {
+        if (net.minecraftforge.fml.loading.FMLEnvironment.dist.isDedicatedServer()) {
+            if (initialized) {
+                com.gpuloader.core.NoiseBatchManager.clearCache();
+                com.gpuloader.gl.GPUComputeThread.shutdown();
+            }
+        }
+    }
+
+    @SubscribeEvent
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase == TickEvent.Phase.START && net.minecraftforge.fml.loading.FMLEnvironment.dist.isDedicatedServer()) {
             if (initialized && biomeUploadPending) {
@@ -195,6 +200,7 @@ public class GPUMod {
                 com.gpuloader.core.GPUComputeManager.processRenderThreadTasks();
                 if (!Config.useSharedContext) {
                     com.gpuloader.gl.NoiseComputeTask.processReadyBatches();
+                    com.gpuloader.gl.MobAiTask.processReadyBatches();
                 }
                 com.gpuloader.gl.MeshCullTask.processReadyBatches();
                 com.gpuloader.core.MeshCullManager.cleanupExpiredCache();

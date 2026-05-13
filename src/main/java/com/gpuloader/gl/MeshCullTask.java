@@ -48,6 +48,7 @@ public class MeshCullTask extends GPUTask<int[]> {
 
     private static int meshProgram = -1;
     private static int inputBuffer = -1;
+    private static IntBuffer cachedOpacityBuf = null;
     private static int staticCounter = 0;
 
     private final long sectionKey;
@@ -82,11 +83,16 @@ public class MeshCullTask extends GPUTask<int[]> {
             // Binding 0: Opacity Flags
             if (inputBuffer == -1) {
                 inputBuffer = GL15.glGenBuffers();
+                GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, inputBuffer);
+                GL15.glBufferData(GL43.GL_SHADER_STORAGE_BUFFER, OPACITY_UINT_COUNT * Integer.BYTES, GL15.GL_STREAM_DRAW);
+                cachedOpacityBuf = BufferUtils.createIntBuffer(OPACITY_UINT_COUNT);
+            } else {
+                GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, inputBuffer);
             }
-            GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, inputBuffer);
-            IntBuffer opacityBuf = BufferUtils.createIntBuffer(OPACITY_UINT_COUNT);
-            opacityBuf.put(opacityFlags, 0, OPACITY_UINT_COUNT).flip();
-            GL15.glBufferData(GL43.GL_SHADER_STORAGE_BUFFER, opacityBuf, GL15.GL_STREAM_DRAW);
+            
+            cachedOpacityBuf.clear();
+            cachedOpacityBuf.put(opacityFlags, 0, OPACITY_UINT_COUNT).flip();
+            GL15.glBufferSubData(GL43.GL_SHADER_STORAGE_BUFFER, 0, cachedOpacityBuf);
             GL32.glBindBufferBase(GL43.GL_SHADER_STORAGE_BUFFER, 0, inputBuffer);
 
             // Binding 1: PBO Write
@@ -150,6 +156,7 @@ public class MeshCullTask extends GPUTask<int[]> {
         if (inputBuffer != -1) {
             GL15.glDeleteBuffers(inputBuffer);
             inputBuffer = -1;
+            cachedOpacityBuf = null;
         }
         meshProgram = -1;
     }
