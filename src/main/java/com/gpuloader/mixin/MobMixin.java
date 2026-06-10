@@ -13,13 +13,42 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * GPU補間方式:
- * - バニラAIは常に実行される (GoalSelector等のスキップなし)
- * - serverAiStep() の最後で、GPU結果があればバニラの移動先に微調整を加える
+ * - GPU計算を行うTick (isGpuTick) のみ CPU AI (serverAiStep) を通常実行して移動意図をキャプチャ。
+ * - それ以外のTickは CPU AI をスキップし、前回の意図にGPU補正をブレンドした目標値を設定することでCPU負荷を大幅に削減。
  */
 @Mixin(Mob.class)
 public abstract class MobMixin {
     @Shadow(aliases = "f_21523_")
     protected MoveControl moveControl;
+
+    @Inject(method = "serverAiStep", at = @At("HEAD"), cancellable = true)
+    private void onServerAiStepHead(CallbackInfo ci) {
+        Mob mob = (Mob) (Object) this;
+        if (mob.level().isClientSide()) return;
+        if (!Config.gpuAi) return;
+
+        long gameTime = mob.level().getGameTime();
+
+        // GPU計算外のTickは、CPU AIの実行をスキップ
+        if (!MobAiManager.isGpuTick(gameTime)) {
+            MobAiManager.MobResult gpuResult = MobAiManager.getResult(mob.getId());
+            MobAiManager.VanillaIntent vanillaIntent = MobAiManager.getVanillaIntent(mob.getId());
+
+            if (gpuResult != null && vanillaIntent != null) {
+                // 意図が古すぎないかチェック (間隔 + 1Tick以内)
+                long age = gameTime - vanillaIntent.capturedTick;
+                if (age <= Config.aiComputeInterval + 1) {
+                    // 前回意図とGPU補正のブレンド
+                    Vec3 blendedTarget = MobAiManager.blendWithGPU(mob, vanillaIntent, gpuResult);
+                    if (blendedTarget != null) {
+                        this.moveControl.setWantedPosition(blendedTarget.x, blendedTarget.y, blendedTarget.z, vanillaIntent.speed);
+                    }
+                    // CPU AI (serverAiStep) の実行をブロック/キャンセル
+                    ci.cancel();
+                }
+            }
+        }
+    }
 
     @Inject(method = "serverAiStep", at = @At("TAIL"))
     private void onServerAiStepTail(CallbackInfo ci) {
@@ -27,21 +56,22 @@ public abstract class MobMixin {
         if (mob.level().isClientSide()) return;
         if (!Config.gpuAi) return;
 
-        // GPU結果とバニラ意図の両方が必要
-        MobAiManager.MobResult gpuResult = MobAiManager.getResult(mob.getId());
-        MobAiManager.VanillaIntent vanillaIntent = MobAiManager.getVanillaIntent(mob.getId());
+        long gameTime = mob.level().getGameTime();
 
-        if (gpuResult == null || vanillaIntent == null) return;
+        // CPU AIを実行したTickのみ、最終調整を行う
+        if (MobAiManager.isGpuTick(gameTime)) {
+            MobAiManager.MobResult gpuResult = MobAiManager.getResult(mob.getId());
+            MobAiManager.VanillaIntent vanillaIntent = MobAiManager.getVanillaIntent(mob.getId());
 
-        // バニラ意図が古すぎる場合はスキップ (5tick以上前)
-        long age = mob.level().getGameTime() - vanillaIntent.capturedTick;
-        if (age > 5) return;
+            if (gpuResult == null || vanillaIntent == null) return;
 
-        // ブレンド: バニラの移動先にGPUの微調整を適用
-        Vec3 blendedTarget = MobAiManager.blendWithGPU(mob, vanillaIntent, gpuResult);
-        if (blendedTarget == null) return; // blendFactor=0 or mob stationary
+            long age = gameTime - vanillaIntent.capturedTick;
+            if (age > Config.aiComputeInterval + 1) return;
 
-        // バニラの速度を維持しつつ、方向のみ微調整
-        this.moveControl.setWantedPosition(blendedTarget.x, blendedTarget.y, blendedTarget.z, vanillaIntent.speed);
+            Vec3 blendedTarget = MobAiManager.blendWithGPU(mob, vanillaIntent, gpuResult);
+            if (blendedTarget == null) return;
+
+            this.moveControl.setWantedPosition(blendedTarget.x, blendedTarget.y, blendedTarget.z, vanillaIntent.speed);
+        }
     }
 }

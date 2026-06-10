@@ -176,7 +176,9 @@ public class GLShaderManager {
             LOGGER.warn("Failed to generate shader hash", e);
         }
 
-        String cacheFileName = name + "_" + gpuInfoHash + "_" + sourceHash + ".bin";
+        // キャッシュファイル名に不正な文字（: / \ 等）が含まれないようサニタイズ
+        String safeName = name.replaceAll("[:\\\\/<>|?*\"]", "_");
+        String cacheFileName = safeName + "_" + gpuInfoHash + "_" + sourceHash + ".bin";
         Path cacheFile = cacheDir != null ? cacheDir.resolve(cacheFileName) : null;
 
         // Try loading from cache
