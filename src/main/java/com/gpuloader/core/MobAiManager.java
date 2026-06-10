@@ -10,8 +10,6 @@ import net.minecraft.world.entity.animal.*;
 import net.minecraft.world.entity.animal.horse.Horse;
 import net.minecraft.world.entity.monster.*;
 import net.minecraft.world.entity.npc.Villager;
-import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.entity.ai.targeting.TargetingConditions;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.phys.AABB;
@@ -40,11 +38,6 @@ public class MobAiManager {
     private static final Map<Integer, VanillaIntent> VANILLA_INTENTS = new ConcurrentHashMap<>();
 
     private static int updateIndex = 0;
-
-    private static long lastAiLogTime = 0;
-    private static int aiBatchCount = 0;
-    private static long aiTotalLatency = 0;
-    private static int aiTotalMobs = 0;
 
     // ─── GPU result (adjustment vector) ───
     public static class MobResult {
@@ -145,113 +138,144 @@ public class MobAiManager {
         if (!Config.gpuAi)
             return;
 
-        List<Mob> snapshot = new ArrayList<>(TRACKED_MOBS.values());
+        // Collect tracked mobs for the current level
+        List<Mob> snapshot = new ArrayList<>();
+        for (Mob m : TRACKED_MOBS.values()) {
+            if (m.level() == level) {
+                snapshot.add(m);
+            }
+        }
+        
         if (snapshot.isEmpty())
             return;
 
-        int size = snapshot.size();
-        int[] ids = new int[size];
-        for (int i = 0; i < size; i++)
-            ids[i] = snapshot.get(i).getId();
+        int size = Math.min(snapshot.size(), com.gpuloader.gl.MobAiTask.MAX_MOBS);
 
-        // Update environmental context in batches
-        for (int i = 0; i < Math.min(Config.aiUpdateBatch, size); i++) {
-            updateIndex = (updateIndex + 1) % size;
-            updateMobContext(snapshot.get(updateIndex), level);
+        // Find all monsters and players in the level once per tick
+        List<net.minecraft.world.entity.monster.Monster> activeMonsters = new ArrayList<>();
+        for (net.minecraft.world.entity.player.Player p : level.players()) {
+            AABB bounds = p.getBoundingBox().inflate(64.0);
+            activeMonsters.addAll(level.getEntitiesOfClass(net.minecraft.world.entity.monster.Monster.class, bounds));
+        }
+
+        // We will collect the data into a float array on the main thread
+        float[] uploadData = new float[size * 32]; // 32 floats per mob
+        int[] entityIds = new int[size];
+
+        for (int i = 0; i < size; i++) {
+            Mob mob = snapshot.get(i);
+            entityIds[i] = mob.getId();
+            
+            // Fast inline context update
+            CachedContext ctx = CONTEXT_CACHE.computeIfAbsent(mob.getId(), k -> new CachedContext());
+            ctx.healthRatio = mob.getHealth() / Math.max(mob.getMaxHealth(), 1.0f);
+            ctx.dayTime = (level.getDayTime() % 24000L) / 24000.0f;
+            
+            BlockPos bp = mob.blockPosition();
+            int blockLight = level.getBrightness(LightLayer.BLOCK, bp);
+            int skyLight = level.getBrightness(LightLayer.SKY, bp);
+            ctx.lightLevel = Math.min(Math.max(blockLight, skyLight - level.getSkyDarken()), 15);
+            
+            int hurtTick = mob.getLastHurtByMobTimestamp();
+            ctx.lastHurtAge = hurtTick > 0 ? Math.min((float) (level.getGameTime() - hurtTick), 200.0f) : 999.0f;
+            ctx.inWater = mob.isInWater() ? 1.0f : 0.0f;
+            ctx.hasTarget = mob.getTarget() != null ? 1.0f : 0.0f;
+
+            // Fast proximity check for danger and allies
+            int allyCount = 0;
+            boolean foundDanger = false;
+            double dangerDistSq = Config.aiDangerRange * Config.aiDangerRange;
+            Vec3 mobPos = mob.position();
+
+            // Check allies from the current level's snapshot
+            for (Mob ally : snapshot) {
+                if (ally == mob) continue;
+                if (ally.getClass() == mob.getClass() && ally.distanceToSqr(mobPos) <= 256.0) { // 16 blocks
+                    allyCount++;
+                }
+            }
+            ctx.nearbyAllyCount = Math.min(allyCount, 10.0f);
+
+            // Check danger from active monsters
+            if (mob instanceof Animal || mob instanceof Villager) {
+                for (net.minecraft.world.entity.monster.Monster m : activeMonsters) {
+                    if (m.distanceToSqr(mobPos) <= dangerDistSq) {
+                        ctx.danger = m.position();
+                        foundDanger = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (!foundDanger) {
+                ctx.danger = new Vec3(mobPos.x, mobPos.y - 1000, mobPos.z);
+            }
+
+            // Write to float array
+            Personality p = getPersonality(mob);
+            VanillaIntent intent = getVanillaIntent(mob.getId());
+            int offset = i * 32;
+
+            uploadData[offset++] = (float) mobPos.x;
+            uploadData[offset++] = (float) mobPos.y;
+            uploadData[offset++] = (float) mobPos.z;
+            uploadData[offset++] = (float) mob.getId();
+
+            if (intent != null) {
+                Vec3 dir = intent.directionFrom(mobPos).normalize();
+                uploadData[offset++] = (float) dir.x;
+                uploadData[offset++] = (float) dir.y;
+                uploadData[offset++] = (float) dir.z;
+                uploadData[offset++] = (float) intent.speed;
+            } else {
+                uploadData[offset++] = 0.0f;
+                uploadData[offset++] = 0.0f;
+                uploadData[offset++] = 0.0f;
+                uploadData[offset++] = 0.0f;
+            }
+
+            uploadData[offset++] = (float) ctx.danger.x;
+            uploadData[offset++] = (float) ctx.danger.y;
+            uploadData[offset++] = (float) ctx.danger.z;
+            uploadData[offset++] = (float) Config.aiDangerRange;
+
+            uploadData[offset++] = p.poiWeight();
+            uploadData[offset++] = p.dangerWeight();
+            uploadData[offset++] = p.idleWeight();
+            uploadData[offset++] = p.speed();
+
+            uploadData[offset++] = p.aggroRange();
+            uploadData[offset++] = p.fleeThreshold();
+            uploadData[offset++] = p.packBehavior();
+            uploadData[offset++] = p.nightActivity();
+
+            uploadData[offset++] = ctx.healthRatio;
+            uploadData[offset++] = ctx.dayTime;
+            uploadData[offset++] = ctx.lightLevel;
+            uploadData[offset++] = ctx.lastHurtAge;
+
+            uploadData[offset++] = ctx.nearbyAllyCount;
+            uploadData[offset++] = ctx.inWater;
+            uploadData[offset++] = ctx.hasTarget;
+            uploadData[offset++] = (float) p.mobTypeId();
+            
+            // padding
+            uploadData[offset++] = 0.0f;
+            uploadData[offset++] = 0.0f;
+            uploadData[offset++] = 0.0f;
+            uploadData[offset] = 0.0f;
         }
 
         long currentTime = level.getGameTime();
 
-        // GPU compute on configured interval (偶数tick等)
+        // GPU compute on configured interval
         if (currentTime % Config.aiComputeInterval == 0) {
-            long startTime = System.currentTimeMillis();
-            MobAiTask task = new MobAiTask(snapshot, currentTime);
+            MobAiTask task = new MobAiTask(uploadData, entityIds, size, currentTime);
             GPUComputeThread.submitTask(task);
-
-            task.result.thenAccept(data -> {
-                long latency = System.currentTimeMillis() - startTime;
-                aiBatchCount++;
-                aiTotalLatency += latency;
-                aiTotalMobs += ids.length;
-
-                long now = System.currentTimeMillis();
-                if (lastAiLogTime == 0) lastAiLogTime = now;
-                if (now - lastAiLogTime >= 600000) { // 10 minutes
-                    com.mojang.logging.LogUtils.getLogger().info(
-                            "[GPU AI] Stats (last 10m): Avg {} mobs/batch, Avg Latency {}ms",
-                            aiTotalMobs / aiBatchCount, aiTotalLatency / aiBatchCount);
-                    lastAiLogTime = now;
-                    aiBatchCount = 0;
-                    aiTotalLatency = 0;
-                    aiTotalMobs = 0;
-                }
-
-                for (int i = 0; i < ids.length; i++) {
-                    if (i * 4 + 3 >= data.length)
-                        break;
-                    MobResult res = new MobResult();
-                    res.dirX = data[i * 4];
-                    res.dirY = data[i * 4 + 1];
-                    res.dirZ = data[i * 4 + 2];
-                    res.actionHint = (int) data[i * 4 + 3];
-                    RESULTS.put(ids[i], res);
-                }
-            });
         }
     }
 
-    // ─── Environment context gathering ───
-    private static void updateMobContext(Mob mob, Level level) {
-        CachedContext ctx = CONTEXT_CACHE.computeIfAbsent(mob.getId(), k -> new CachedContext());
 
-        ctx.healthRatio = mob.getHealth() / Math.max(mob.getMaxHealth(), 1.0f);
-
-        long rawTime = level.getDayTime() % 24000L;
-        ctx.dayTime = rawTime / 24000.0f;
-
-        BlockPos bp = mob.blockPosition();
-        int blockLight = level.getBrightness(LightLayer.BLOCK, bp);
-        int skyLight = level.getBrightness(LightLayer.SKY, bp);
-        int skyDarken = level.getSkyDarken();
-        ctx.lightLevel = Math.min(Math.max(blockLight, skyLight - skyDarken), 15);
-
-        int hurtTick = mob.getLastHurtByMobTimestamp();
-        ctx.lastHurtAge = hurtTick > 0 ? Math.min((float) (level.getGameTime() - hurtTick), 200.0f) : 999.0f;
-
-        ctx.inWater = mob.isInWater() ? 1.0f : 0.0f;
-        ctx.hasTarget = mob.getTarget() != null ? 1.0f : 0.0f;
-
-        // Nearby danger detection
-        double range = Config.aiDangerRange;
-        AABB searchBox = mob.getBoundingBox().inflate(range);
-        List<LivingEntity> entities = level.getEntitiesOfClass(LivingEntity.class, searchBox);
-
-        int allyCount = 0;
-        boolean foundDanger = false;
-
-        for (LivingEntity e : entities) {
-            if (e == mob)
-                continue;
-            if (e.getClass() == mob.getClass())
-                allyCount++;
-
-            if (!foundDanger) {
-                // 危険源の検出 (バニラAIが処理するPOIとは別に、環境認識として)
-                if (mob instanceof Animal && e instanceof Monster) {
-                    ctx.danger = e.position();
-                    foundDanger = true;
-                } else if (mob instanceof Villager && e instanceof Monster) {
-                    ctx.danger = e.position();
-                    foundDanger = true;
-                }
-            }
-        }
-
-        ctx.nearbyAllyCount = (float) Math.min(allyCount, 10);
-        if (!foundDanger) {
-            ctx.danger = new Vec3(mob.getX(), mob.getY() - 1000, mob.getZ());
-        }
-    }
 
     // ─── Blend vanilla intent with GPU adjustment ───
     public static Vec3 blendWithGPU(Mob mob, VanillaIntent vanilla, MobResult gpu) {
@@ -284,6 +308,13 @@ public class MobAiManager {
     // ─── Accessors ───
     public static MobResult getResult(int entityId) {
         return RESULTS.get(entityId);
+    }
+
+    /**
+     * MobAiTask.processReadyBatches() から呼ばれ、非同期で回収したGPU計算結果を格納する。
+     */
+    public static void storeResult(int entityId, MobResult result) {
+        RESULTS.put(entityId, result);
     }
 
     public static VanillaIntent getVanillaIntent(int entityId) {

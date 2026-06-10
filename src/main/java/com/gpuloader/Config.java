@@ -95,8 +95,8 @@ public class Config {
                 .defineInRange("aiUpdateBatchSize", 20, 1, 1000);
 
         AI_COMPUTE_INTERVAL_TICKS = SERVER_BUILDER
-                .comment("Interval in ticks to run GPU AI computation. (1-20)")
-                .defineInRange("aiComputeIntervalTicks", 2, 1, 20);
+                .comment("Interval in ticks to run GPU AI computation. (1-5)")
+                .defineInRange("aiComputeIntervalTicks", 2, 1, 5);
 
         AI_POI_RANGE = SERVER_BUILDER
                 .comment("Range in blocks for mobs to search for POIs/Players. (4.0 - 128.0)")
@@ -151,7 +151,7 @@ public class Config {
             useSharedContext = USE_SHARED_CONTEXT.get();
             gpuAi = ENABLE_GPU_AI.get();
             aiUpdateBatch = AI_UPDATE_BATCH_SIZE.get();
-            aiComputeInterval = AI_COMPUTE_INTERVAL_TICKS.get();
+            aiComputeInterval = Math.max(1, Math.min(5, AI_COMPUTE_INTERVAL_TICKS.get()));
             aiPoiRange = AI_POI_RANGE.get();
             aiDangerRange = AI_DANGER_RANGE.get();
             gpuBlendFactor = AI_GPU_BLEND_FACTOR.get();

@@ -23,6 +23,9 @@ public class GPUMod {
     private static volatile boolean biomeUploadPending = false;
 
     public GPUMod(FMLJavaModLoadingContext context) {
+        // Register API implementation
+        com.gpuloader.api.GPULoaderAPI.registerInternal(com.gpuloader.core.GPUComputeManager.getInstance());
+
         IEventBus modEventBus = context.getModEventBus();
 
         // Register the commonSetup method for modloading
@@ -99,11 +102,6 @@ public class GPUMod {
         com.gpuloader.core.NoiseBatchManager.clearCache();
         com.gpuloader.core.BiomeParameterExtractor.clear();
         com.gpuloader.core.BiomeResultCache.clear();
-        // Only call GPU cleanup if GPU was actually initialized
-        if (initialized) {
-            com.gpuloader.gl.BiomeGPUBuffer.cleanup();
-            com.gpuloader.gl.GPUComputeThread.shutdown();
-        }
         biomeUploadPending = false;
     }
 
@@ -112,6 +110,17 @@ public class GPUMod {
         if (net.minecraftforge.fml.loading.FMLEnvironment.dist.isDedicatedServer()) {
             if (!initialized) {
                 LOGGER.info("GPU Acceleration Mod: Initializing GPU Infrastructure on Dedicated Server");
+
+                // Step 0: Check and extract server libraries (.jar)
+                boolean libsExtracted = com.gpuloader.core.ServerLibExtractor.extractLibs();
+                if (libsExtracted) {
+                    LOGGER.error("=========================================================");
+                    LOGGER.error("[GPU Loader] Missing Server Libraries have been extracted.");
+                    LOGGER.error("[GPU Loader] YOU MUST RESTART THE SERVER NOW TO LOAD THEM.");
+                    LOGGER.error("=========================================================");
+                    System.exit(0);
+                    return;
+                }
 
                 // Step 1: Extract native libraries (.dll/.so) from mod JAR if needed
                 // This MUST happen before any LWJGL class is loaded/initialized
@@ -135,6 +144,16 @@ public class GPUMod {
                     LOGGER.warn("GPU features will be DISABLED. The mod will run with CPU-only (vanilla) behavior.");
                     initialized = false;
                 }
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public void onServerStopping(net.minecraftforge.event.server.ServerStoppingEvent event) {
+        if (net.minecraftforge.fml.loading.FMLEnvironment.dist.isDedicatedServer()) {
+            if (initialized) {
+                com.gpuloader.core.NoiseBatchManager.clearCache();
+                com.gpuloader.gl.GPUComputeThread.shutdown();
             }
         }
     }
@@ -181,6 +200,7 @@ public class GPUMod {
                 com.gpuloader.core.GPUComputeManager.processRenderThreadTasks();
                 if (!Config.useSharedContext) {
                     com.gpuloader.gl.NoiseComputeTask.processReadyBatches();
+                    com.gpuloader.gl.MobAiTask.processReadyBatches();
                 }
                 com.gpuloader.gl.MeshCullTask.processReadyBatches();
                 com.gpuloader.core.MeshCullManager.cleanupExpiredCache();

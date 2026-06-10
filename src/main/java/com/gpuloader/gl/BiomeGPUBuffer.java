@@ -9,7 +9,6 @@ import org.lwjgl.opengl.GL43;
 import org.slf4j.Logger;
 
 import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
 
 /**
  * バイオームパラメータのSSBOを管理するクラス。
@@ -96,13 +95,7 @@ public class BiomeGPUBuffer {
         }
     }
 
-    /**
-     * バイオーム出力バッファからIDを読み出す（同期読み出し用）。
-     */
-    public static void readBiomeIds(IntBuffer dest, int numPoints) {
-        GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, biomeOutputBuffer);
-        GL15.glGetBufferSubData(GL43.GL_SHADER_STORAGE_BUFFER, 0, dest);
-    }
+
 
     public static boolean isInitialized() {
         return initialized;
