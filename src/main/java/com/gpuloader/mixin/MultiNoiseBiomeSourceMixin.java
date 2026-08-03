@@ -28,7 +28,7 @@ public abstract class MultiNoiseBiomeSourceMixin {
     private void onGetNoiseBiome(int quartX, int quartY, int quartZ,
                                   Climate.Sampler sampler,
                                   CallbackInfoReturnable<Holder<Biome>> cir) {
-        if (!BiomeParameterExtractor.isExtracted()) return;
+        if (!com.gpuloader.Config.terrainNoise || !BiomeParameterExtractor.isExtracted()) return;
 
         int biomeId = BiomeResultCache.getBiomeId(quartX, quartY, quartZ);
         if (biomeId < 0) return; // Cache miss, fall through to vanilla

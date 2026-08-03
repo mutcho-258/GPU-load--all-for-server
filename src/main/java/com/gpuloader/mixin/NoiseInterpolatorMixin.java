@@ -22,6 +22,8 @@ public abstract class NoiseInterpolatorMixin implements NoiseInterpolatorAccesso
 
     @Override
     public boolean shouldSubstitute() {
+        if (!com.gpuloader.Config.terrainNoise)
+            return false;
         if (noiseFiller == null)
             return false;
 

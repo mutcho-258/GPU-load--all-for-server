@@ -75,6 +75,8 @@ public class GPUMod {
         LOGGER.info("GPU Acceleration Mod: Common Setup");
         // Check for conflicting mods and disable chunk meshing if needed
         com.gpuloader.core.ModCompatChecker.checkAndDisableIfNeeded();
+        // Load Mob AI personalities config
+        com.gpuloader.core.MobAiManager.loadPersonalities();
     }
 
     @SubscribeEvent
@@ -103,6 +105,11 @@ public class GPUMod {
         com.gpuloader.core.BiomeParameterExtractor.clear();
         com.gpuloader.core.BiomeResultCache.clear();
         biomeUploadPending = false;
+        
+        // Clear MDI queue if it was initialized
+        if (com.gpuloader.gl.EntityMdiManager.isInitialized()) {
+            com.gpuloader.gl.EntityMdiManager.clearQueue();
+        }
     }
 
     @SubscribeEvent
