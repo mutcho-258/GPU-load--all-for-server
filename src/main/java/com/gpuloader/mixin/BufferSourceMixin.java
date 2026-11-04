@@ -10,8 +10,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class BufferSourceMixin {
     @Inject(method = "endBatch()V", at = @At("HEAD"))
     private void onEndBatchHead(CallbackInfo ci) {
-        // CPUのバッファ（防具・衣装・半透明ゲルなど）がフラッシュして描画される直前に、
-        // GPU側のMDIベースモデルを描画し、デプスバッファを構築します。
-        EntityMdiManager.flushDirect();
+        // MDIモデルは RenderLevelStageEvent.Stage.AFTER_ENTITIES で一括描画されるため、
+        // バニラのBufferSource.endBatch()への割り込みは不要（チェスト・鐘等の固定バッファ描画を保護するため無効化）
     }
+    // endBatch(RenderType) へのフックは意図的に外しています。
+    // layer.render() 内でのgetBuffer()呼び出しが引き起こす中間endBatch(RenderType)で
+    // flushDirect()が複数回呼ばれると、BATCHES.clear()後に服レイヤーが描画されるため
+    // 服が見えなくなります。
 }

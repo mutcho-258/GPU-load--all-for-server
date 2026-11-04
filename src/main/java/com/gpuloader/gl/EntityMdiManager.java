@@ -43,13 +43,24 @@ public class EntityMdiManager {
     private static final List<Integer> ALL_INDICES = new ArrayList<>();
     private static final Map<String, EntityMeshInfo> MESHES = new HashMap<>();
 
-    public static class BatchKey {
+    public static class BatchKey implements Comparable<BatchKey> {
+        public final int layerOrder; // 0: 肌, 1: バイオーム服, 2: 職業服, 3: レベルバッジ
         public final net.minecraft.resources.ResourceLocation texture;
         public final String registryName;
 
-        public BatchKey(net.minecraft.resources.ResourceLocation texture, String registryName) {
+        public BatchKey(int layerOrder, net.minecraft.resources.ResourceLocation texture, String registryName) {
+            this.layerOrder = layerOrder;
             this.texture = texture;
             this.registryName = registryName;
+        }
+
+        @Override
+        public int compareTo(BatchKey o) {
+            int cmp = Integer.compare(this.layerOrder, o.layerOrder);
+            if (cmp != 0) return cmp;
+            cmp = this.registryName.compareTo(o.registryName);
+            if (cmp != 0) return cmp;
+            return this.texture.compareTo(o.texture);
         }
 
         @Override
@@ -57,17 +68,17 @@ public class EntityMdiManager {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             BatchKey batchKey = (BatchKey) o;
-            return texture.equals(batchKey.texture) && registryName.equals(batchKey.registryName);
+            return layerOrder == batchKey.layerOrder && texture.equals(batchKey.texture) && registryName.equals(batchKey.registryName);
         }
 
         @Override
         public int hashCode() {
-            return java.util.Objects.hash(texture, registryName);
+            return java.util.Objects.hash(layerOrder, texture, registryName);
         }
     }
 
-    // テクスチャとモブ種別ごとのレンダリングバッチ
-    private static final Map<BatchKey, List<QueuedInstance>> BATCHES = new HashMap<>();
+    // テクスチャとモブ種別ごとのレンダリングバッチ (layerOrder順に描画するためTreeMapを使用)
+    private static final java.util.NavigableMap<BatchKey, List<QueuedInstance>> BATCHES = new java.util.TreeMap<>();
 
     public static class SkinnedVertex {
         public final float x, y, z;
@@ -309,24 +320,38 @@ public class EntityMdiManager {
             "layout(location = 0) out vec4 outColor;\n" +
             "\n" +
             "uniform sampler2D textureSampler;\n" +
+            "uniform sampler2D lightMapSampler;\n" +
             "\n" +
             "void main() {\n" +
-            "    vec3 normal = normalize(fragNormal);\n" +
-            "    vec3 lightDir = normalize(vec3(0.3, 1.0, 0.5));\n" +
-            "    float diff = max(dot(normal, lightDir), 0.0) * 0.4;\n" +
-            "    \n" +
-            "    float blockFactor = fragLight.x / 15.0;\n" +
-            "    float skyFactor = fragLight.y / 15.0;\n" +
-            "    float ambient = max(0.15, max(blockFactor * 0.9, skyFactor * 0.6));\n" +
-            "    \n" +
             "    vec4 texColor = texture(textureSampler, fragTexCoord);\n" +
-            "    vec4 finalColor = texColor * fragColor * (ambient + diff);\n" +
-            "    \n" +
-            "    if (fragOverlay.a > 0.0) {\n" +
-            "        finalColor.rgb = mix(finalColor.rgb, fragOverlay.rgb, fragOverlay.a);\n" +
+            "    if (texColor.a < 0.1) {\n" +
+            "        discard;\n" +
             "    }\n" +
             "    \n" +
-            "    outColor = vec4(finalColor.rgb, texColor.a * fragColor.a);\n" +
+            "    // バニラ準拠のライトマップサンプリング (x: blockLight 0..15, y: skyLight 0..15)\n" +
+            "    ivec2 lightCoord = clamp(ivec2(round(fragLight)), 0, 15);\n" +
+            "    vec4 lightColor = texelFetch(lightMapSampler, lightCoord, 0);\n" +
+            "    \n" +
+            "    // 安全フォールバック: 万一ライトマップテクスチャが未バインド（黒/透明）の場合の保険\n" +
+            "    if (lightColor.a < 0.1 || dot(lightColor.rgb, vec3(1.0)) < 0.001) {\n" +
+            "        float b = fragLight.x / 15.0;\n" +
+            "        float s = fragLight.y / 15.0;\n" +
+            "        lightColor = vec4(vec3(max(0.2, max(b * 0.9, s * 0.6))), 1.0);\n" +
+            "    }\n" +
+            "    \n" +
+            "    // 自然な立体感（陰影）のためのディフューズ計算\n" +
+            "    vec3 normal = normalize(fragNormal);\n" +
+            "    vec3 lightDir = normalize(vec3(0.2, 1.0, -0.7));\n" +
+            "    float diff = max(dot(normal, lightDir), 0.0);\n" +
+            "    float diffuseFactor = 0.6 + 0.4 * diff;\n" +
+            "    \n" +
+            "    vec3 finalRgb = texColor.rgb * fragColor.rgb * lightColor.rgb * diffuseFactor;\n" +
+            "    \n" +
+            "    if (fragOverlay.a > 0.0) {\n" +
+            "        finalRgb = mix(finalRgb, fragOverlay.rgb, fragOverlay.a);\n" +
+            "    }\n" +
+            "    \n" +
+            "    outColor = vec4(finalRgb, texColor.a * fragColor.a);\n" +
             "}\n";
 
         int vertShader = GL20.glCreateShader(GL20.GL_VERTEX_SHADER);
@@ -361,7 +386,11 @@ public class EntityMdiManager {
         GL20.glUseProgram(mdiProgram);
         int locTexSampler = GL20.glGetUniformLocation(mdiProgram, "textureSampler");
         if (locTexSampler != -1) {
-            GL20.glUniform1i(locTexSampler, 0);
+            GL20.glUniform1i(locTexSampler, 0); // テクスチャユニット0
+        }
+        int locLightSampler = GL20.glGetUniformLocation(mdiProgram, "lightMapSampler");
+        if (locLightSampler != -1) {
+            GL20.glUniform1i(locLightSampler, 2); // テクスチャユニット2
         }
         GL20.glUseProgram(0);
     }
@@ -369,7 +398,12 @@ public class EntityMdiManager {
     @SuppressWarnings("unchecked")
     private static Map<String, net.minecraft.client.model.geom.ModelPart> getChildren(net.minecraft.client.model.geom.ModelPart part) {
         try {
-            java.lang.reflect.Field childrenField = net.minecraft.client.model.geom.ModelPart.class.getDeclaredField("children");
+            java.lang.reflect.Field childrenField;
+            try {
+                childrenField = net.minecraft.client.model.geom.ModelPart.class.getDeclaredField("children");
+            } catch (NoSuchFieldException e) {
+                childrenField = net.minecraft.client.model.geom.ModelPart.class.getDeclaredField("f_104213_");
+            }
             childrenField.setAccessible(true);
             return (Map<String, net.minecraft.client.model.geom.ModelPart>) childrenField.get(part);
         } catch (Exception e) {
@@ -395,6 +429,57 @@ public class EntityMdiManager {
             net.minecraft.client.model.EntityModel<?> model = 
                 ((net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?>) renderer).getModel();
             
+            return extractMeshFromModel(registryName, model);
+        } catch (Exception e) {
+            LOGGER.error("Failed to extract model mesh for " + registryName, e);
+            return null;
+        }
+    }
+
+    /**
+     * スライムの外側ゲルレイヤー（SlimeOuterLayer）のモデルメッシュを抽出します。
+     */
+    private static EntityMeshInfo getOrExtractSlimeOuterMesh(String outerRegistryName, LivingEntity entity) {
+        EntityMeshInfo info = MESHES.get(outerRegistryName);
+        if (info != null) return info;
+
+        try {
+            net.minecraft.client.renderer.entity.EntityRenderer<? super LivingEntity> renderer = 
+                net.minecraft.client.Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
+            if (!(renderer instanceof net.minecraft.client.renderer.entity.LivingEntityRenderer)) {
+                return null;
+            }
+            List<?> layers = getLayersList((net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?>) renderer);
+            if (layers != null) {
+                for (Object layer : layers) {
+                    if (layer instanceof net.minecraft.client.renderer.entity.layers.SlimeOuterLayer) {
+                        Class<?> clazz = layer.getClass();
+                        while (clazz != null && clazz != Object.class) {
+                            for (java.lang.reflect.Field field : clazz.getDeclaredFields()) {
+                                if (net.minecraft.client.model.EntityModel.class.isAssignableFrom(field.getType())) {
+                                    field.setAccessible(true);
+                                    Object outerModel = field.get(layer);
+                                    if (outerModel != null) {
+                                        return extractMeshFromModel(outerRegistryName, outerModel);
+                                    }
+                                }
+                            }
+                            clazz = clazz.getSuperclass();
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.error("Failed to extract slime outer mesh", e);
+        }
+        return null;
+    }
+
+    private static EntityMeshInfo extractMeshFromModel(String registryName, Object model) {
+        EntityMeshInfo info = MESHES.get(registryName);
+        if (info != null) return info;
+
+        try {
             List<net.minecraft.client.model.geom.ModelPart> allParts = new ArrayList<>();
             Map<net.minecraft.client.model.geom.ModelPart, String> partNames = new HashMap<>();
             extractModelParts(model, allParts, partNames);
@@ -532,7 +617,12 @@ public class EntityMdiManager {
     private static List<SkinnedVertex> extractPartVertices(net.minecraft.client.model.geom.ModelPart part, int boneId) {
         List<SkinnedVertex> out = new ArrayList<>();
         try {
-            java.lang.reflect.Field cubesField = net.minecraft.client.model.geom.ModelPart.class.getDeclaredField("cubes");
+            java.lang.reflect.Field cubesField;
+            try {
+                cubesField = net.minecraft.client.model.geom.ModelPart.class.getDeclaredField("cubes");
+            } catch (NoSuchFieldException e) {
+                cubesField = net.minecraft.client.model.geom.ModelPart.class.getDeclaredField("f_104212_");
+            }
             cubesField.setAccessible(true);
             List<?> cubes = (List<?>) cubesField.get(part);
 
@@ -582,7 +672,8 @@ public class EntityMdiManager {
             ssbo = GL15.glGenBuffers();
         }
 
-        GL30.glBindVertexArray(vao);
+        // バニラのVAOキャッシュと同期させるため GlStateManager を経由してバインド
+        com.mojang.blaze3d.platform.GlStateManager._glBindVertexArray(vao);
 
         // VBOの構築
         GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, sharedVbo);
@@ -621,7 +712,8 @@ public class EntityMdiManager {
         GL20.glVertexAttribPointer(3, 1, GL11.GL_FLOAT, false, 9 * Float.BYTES, 8 * Float.BYTES);
         GL20.glEnableVertexAttribArray(3);
 
-        GL30.glBindVertexArray(0);
+        com.mojang.blaze3d.vertex.BufferUploader.reset();
+        com.mojang.blaze3d.vertex.VertexBuffer.unbind();
     }
 
     @SuppressWarnings("unchecked")
@@ -653,18 +745,34 @@ public class EntityMdiManager {
         float headYawDegrees = headYawAbs - bodyYaw;
         float headPitchDegrees = net.minecraft.util.Mth.rotLerp(partialTick, entity.xRotO, entity.getXRot());
 
+        // レンダラーの取得
+        net.minecraft.client.renderer.entity.EntityRenderer<? super LivingEntity> entityRenderer = 
+            net.minecraft.client.Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
+        net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?> livingRenderer = 
+            (entityRenderer instanceof net.minecraft.client.renderer.entity.LivingEntityRenderer) ?
+            (net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?>) entityRenderer : null;
+
+        float ageInTicks = (livingRenderer != null) ? getBob(livingRenderer, entity, partialTick) : ((float)entity.tickCount + partialTick);
+
         // CPU上で一度 setupAnim を走らせ、ModelPartの各回転角（xRot, yRot, zRot, x, y, z）と visible を計算
-        try {
-            net.minecraft.client.renderer.entity.EntityRenderer<? super LivingEntity> renderer = 
-                net.minecraft.client.Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
-            if (renderer instanceof net.minecraft.client.renderer.entity.LivingEntityRenderer) {
+        // resetPose() を先に呼ぶことで、前エンティティの layer.render() が引き起こした hatVisible(false) 等の
+        // モデル状態変更（head.visible=false など）をリセットする
+        if (livingRenderer != null) {
+            try {
                 net.minecraft.client.model.EntityModel<LivingEntity> model = 
-                    (net.minecraft.client.model.EntityModel<LivingEntity>) ((net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?>) renderer).getModel();
-                float ageInTicks = getBob((net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?>) renderer, entity, partialTick);
+                    (net.minecraft.client.model.EntityModel<LivingEntity>) livingRenderer.getModel();
+                if (model instanceof net.minecraft.client.model.VillagerHeadModel) {
+                    ((net.minecraft.client.model.VillagerHeadModel) model).hatVisible(true);
+                }
+                resetAllPartsVisible(model);
+                model.attackTime = entity.getAttackAnim(partialTick);
+                model.riding = entity.isPassenger() && entity.getVehicle() != null && entity.getVehicle().shouldRiderSit();
+                model.young = entity.isBaby();
+                model.prepareMobModel(entity, limbSwing, limbSwingAmount, partialTick);
                 model.setupAnim(entity, limbSwing, limbSwingAmount, ageInTicks, headYawDegrees, headPitchDegrees);
+            } catch (Exception e) {
+                // ignore setupAnim call failures
             }
-        } catch (Exception e) {
-            // ignore setupAnim call failures
         }
 
         // 各ボーンの現在の回転角 (xRot, yRot, zRot) および 動的平行移動値 (x, y, z - staticX/Y/Z) を収集
@@ -707,77 +815,93 @@ public class EntityMdiManager {
             overlayA = 0.5f;
         }
 
-        // 光量アンパック (0..15 の範囲に戻す)
-        float blockLight = (float) ((packedLight & 0xFFFF) / 16.0f);
-        float skyLight = (float) (((packedLight >> 16) & 0xFFFF) / 16.0f);
+        // 光量アンパック (バニラ準拠で 0..15 の範囲を取得)
+        float blockLight = (float) net.minecraft.client.renderer.LightTexture.block(packedLight);
+        float skyLight = (float) net.minecraft.client.renderer.LightTexture.sky(packedLight);
 
-        // バニラに合わせて Y 軸および X 軸を反転し、胴体のY回転を適用してから基準位置 (0.0, -1.501, 0.0) へ平行移動
-        Matrix4f modelView = new Matrix4f(poseStack.last().pose());
-        
-        // 1. 胴体のY軸回転 (setupRotations) - 軸反転の前に適用することで回転方向の逆転を防ぐ
-        float bodyRotRad = (180.0f - bodyYaw) * ((float)Math.PI / 180.0f);
-        modelView.rotateY(bodyRotRad);
-        
-        // 2. X,Yフリップ
-        modelView.scale(-1.0f, -1.0f, 1.0f);
-
-        // レンダラー固有のスケール（スライムの大きさなど）をリフレクション経由で適用
+        // バニラと100%同一の姿勢変換（睡眠位置オフセット、死亡演出/Dinnerbone/激流/氷漬け等の setupRotations、X/Yフリップ、固有scale、基準位置）を適用
         PoseStack tempStack = new PoseStack();
-        tempStack.last().pose().set(modelView);
-        try {
-            net.minecraft.client.renderer.entity.EntityRenderer<? super LivingEntity> renderer = 
-                net.minecraft.client.Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
-            if (renderer instanceof net.minecraft.client.renderer.entity.LivingEntityRenderer) {
-                invokeRendererScale((net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?>) renderer, entity, tempStack, partialTick);
+        tempStack.last().pose().set(poseStack.last().pose());
+        applyEntityTransforms(tempStack, livingRenderer, entity, partialTick, bodyYaw, ageInTicks);
+        Matrix4f modelView = new Matrix4f(tempStack.last().pose());
+
+        BatchKey baseKey = new BatchKey(0, texture, registryName);
+        QueuedInstance instance = new QueuedInstance(modelView, boneRotations, boneTranslations, r, g, b, 1.0f, overlayR, overlayG, overlayB, overlayA, blockLight, skyLight);
+        BATCHES.computeIfAbsent(baseKey, k -> new ArrayList<>()).add(instance);
+
+        // 村人・ゾンビ村人の服・職業服・装飾レイヤーを直接 GPU MDI パイプラインに追加
+        // （CPUとGPUの計算ズレによるZ-Fightingや深度埋もれを原理的に防ぎ、同一パイプラインで描画する）
+        if (entity instanceof net.minecraft.world.entity.npc.Villager) {
+            net.minecraft.world.entity.npc.Villager villager = (net.minecraft.world.entity.npc.Villager) entity;
+            net.minecraft.world.entity.npc.VillagerData data = villager.getVillagerData();
+            
+            // 1. バイオーム服 (layerOrder = 1)
+            net.minecraft.resources.ResourceLocation typeKey = net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE.getKey(data.getType());
+            net.minecraft.resources.ResourceLocation typeTex = getVillagerResourceLocation("type", typeKey);
+            BATCHES.computeIfAbsent(new BatchKey(1, typeTex, registryName), k -> new ArrayList<>()).add(instance);
+
+            // 2. 職業服 (layerOrder = 2)
+            if (data.getProfession() != net.minecraft.world.entity.npc.VillagerProfession.NONE && !villager.isBaby()) {
+                net.minecraft.resources.ResourceLocation profKey = net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION.getKey(data.getProfession());
+                net.minecraft.resources.ResourceLocation profTex = getVillagerResourceLocation("profession", profKey);
+                BATCHES.computeIfAbsent(new BatchKey(2, profTex, registryName), k -> new ArrayList<>()).add(instance);
+
+                // 3. 職業レベルバッジ (layerOrder = 3)
+                if (data.getProfession() != net.minecraft.world.entity.npc.VillagerProfession.NITWIT) {
+                    int level = net.minecraft.util.Mth.clamp(data.getLevel(), 1, 5);
+                    net.minecraft.resources.ResourceLocation levelKey = LEVEL_LOCATIONS.get(level);
+                    if (levelKey != null) {
+                        net.minecraft.resources.ResourceLocation levelTex = getVillagerResourceLocation("profession_level", levelKey);
+                        BATCHES.computeIfAbsent(new BatchKey(3, levelTex, registryName), k -> new ArrayList<>()).add(instance);
+                    }
+                }
             }
-        } catch (Exception e) {
-            if (entity instanceof net.minecraft.world.entity.AgeableMob && ((net.minecraft.world.entity.AgeableMob) entity).isBaby()) {
-                tempStack.scale(0.5f, 0.5f, 0.5f);
+        } else if (entity instanceof net.minecraft.world.entity.monster.ZombieVillager) {
+            net.minecraft.world.entity.monster.ZombieVillager zombieVillager = (net.minecraft.world.entity.monster.ZombieVillager) entity;
+            net.minecraft.world.entity.npc.VillagerData data = zombieVillager.getVillagerData();
+            
+            net.minecraft.resources.ResourceLocation typeKey = net.minecraft.core.registries.BuiltInRegistries.VILLAGER_TYPE.getKey(data.getType());
+            net.minecraft.resources.ResourceLocation typeTex = getZombieVillagerResourceLocation("type", typeKey);
+            BATCHES.computeIfAbsent(new BatchKey(1, typeTex, registryName), k -> new ArrayList<>()).add(instance);
+
+            if (data.getProfession() != net.minecraft.world.entity.npc.VillagerProfession.NONE && !zombieVillager.isBaby()) {
+                net.minecraft.resources.ResourceLocation profKey = net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION.getKey(data.getProfession());
+                net.minecraft.resources.ResourceLocation profTex = getZombieVillagerResourceLocation("profession", profKey);
+                BATCHES.computeIfAbsent(new BatchKey(2, profTex, registryName), k -> new ArrayList<>()).add(instance);
+
+                int level = net.minecraft.util.Mth.clamp(data.getLevel(), 1, 5);
+                net.minecraft.resources.ResourceLocation levelKey = LEVEL_LOCATIONS.get(level);
+                if (levelKey != null) {
+                    net.minecraft.resources.ResourceLocation levelTex = getZombieVillagerResourceLocation("profession_level", levelKey);
+                    BATCHES.computeIfAbsent(new BatchKey(3, levelTex, registryName), k -> new ArrayList<>()).add(instance);
+                }
+            }
+        } else if (entity instanceof net.minecraft.world.entity.monster.Slime && !(entity instanceof net.minecraft.world.entity.monster.MagmaCube)) {
+            // スライムの外側ゲルレイヤーを直接 GPU MDI パイプラインに追加 (layerOrder = 1)
+            // （CPUとGPUの計算ズレや深度競合を完全に排除し、本体コア描画の直後に半透明描画する）
+            String outerRegistryName = registryName + "_outer";
+            EntityMeshInfo outerMesh = getOrExtractSlimeOuterMesh(outerRegistryName, entity);
+            if (outerMesh != null) {
+                BATCHES.computeIfAbsent(new BatchKey(1, texture, outerRegistryName), k -> new ArrayList<>()).add(instance);
             }
         }
-        modelView.set(tempStack.last().pose());
-        
-        modelView.translate(0.0f, -1.501f, 0.0f);
 
-        BatchKey key = new BatchKey(texture, registryName);
-        List<QueuedInstance> list = BATCHES.computeIfAbsent(key, k -> new ArrayList<>());
-        list.add(new QueuedInstance(modelView, boneRotations, boneTranslations, r, g, b, 1.0f, overlayR, overlayG, overlayB, overlayA, blockLight, skyLight));
-
-        // CPU側のRenderLayers（防具、衣装、羊毛、エンダーマンの光る目など）をバニラのコードでレンダリング
-        try {
-            net.minecraft.client.renderer.entity.EntityRenderer<? super LivingEntity> renderer = 
-                net.minecraft.client.Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(entity);
-            if (renderer instanceof net.minecraft.client.renderer.entity.LivingEntityRenderer) {
-                net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?> livingRenderer = 
-                    (net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?>) renderer;
-                
+        // CPU側のRenderLayers（防具、手持ちアイテム、頭のブロックなど）のみをバニラコードでレンダリング
+        if (livingRenderer != null) {
+            try {
                 List<?> layers = getLayersList(livingRenderer);
                 if (layers != null && !layers.isEmpty()) {
-                    float ageInTicks = getBob(livingRenderer, entity, partialTick);
-                    
-                    // レンダリング用の一時姿勢スタックを作成し、バニラのLivingEntityRendererと同一の変換を適用
                     poseStack.pushPose();
-                    
-                    // 1. 胴体のY軸回転 (setupRotations) - 軸反転の前に適用することで回転方向の逆転を防ぐ
-                    poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(180.0f - bodyYaw));
-                    
-                    // 2. X,Yフリップ
-                    poseStack.scale(-1.0f, -1.0f, 1.0f);
-                    
-                    // 3. レンダラー固有のスケール（スライムの大きさなど）の適用
-                    try {
-                        invokeRendererScale(livingRenderer, entity, poseStack, partialTick);
-                    } catch (Exception e) {
-                        if (entity instanceof net.minecraft.world.entity.AgeableMob && ((net.minecraft.world.entity.AgeableMob) entity).isBaby()) {
-                            poseStack.scale(0.5f, 0.5f, 0.5f);
-                        }
-                    }
-                    
-                    // 4. 基準位置調整
-                    poseStack.translate(0.0f, -1.501f, 0.0f);
-                    
+                    applyEntityTransforms(poseStack, livingRenderer, entity, partialTick, bodyYaw, ageInTicks);
+
                     for (Object layer : layers) {
                         if (layer instanceof net.minecraft.client.renderer.entity.layers.RenderLayer) {
+                            // 村人の服およびスライムの外側ゲルはGPU MDI側で一括描画するため、バニラ側ではスキップ
+                            if (layer instanceof net.minecraft.client.renderer.entity.layers.VillagerProfessionLayer ||
+                                layer instanceof net.minecraft.client.renderer.entity.layers.SlimeOuterLayer) {
+                                continue;
+                            }
+
                             net.minecraft.client.renderer.entity.layers.RenderLayer<LivingEntity, net.minecraft.client.model.EntityModel<LivingEntity>> renderLayer = 
                                 (net.minecraft.client.renderer.entity.layers.RenderLayer<LivingEntity, net.minecraft.client.model.EntityModel<LivingEntity>>) layer;
                             
@@ -787,9 +911,9 @@ public class EntityMdiManager {
                     
                     poseStack.popPose();
                 }
+            } catch (Exception e) {
+                // ignore layer rendering failures
             }
-        } catch (Exception e) {
-            // ignore layer rendering failures
         }
 
         return true;
@@ -800,6 +924,7 @@ public class EntityMdiManager {
     }
 
     private static void bindEntityTexture(net.minecraft.resources.ResourceLocation texture) {
+        RenderSystem.activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE0);
         RenderSystem.setShaderTexture(0, texture);
         net.minecraft.client.renderer.texture.AbstractTexture tex = 
             net.minecraft.client.Minecraft.getInstance().getTextureManager().getTexture(texture);
@@ -810,6 +935,11 @@ public class EntityMdiManager {
 
     public static void flush(PoseStack poseStack, Matrix4f projMatrix) {
         if (!initialized || BATCHES.isEmpty()) return;
+
+        // バニラのライトマップテクスチャを有効化 (テクスチャユニット2にバインド)
+        RenderSystem.activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE2);
+        net.minecraft.client.Minecraft.getInstance().gameRenderer.lightTexture().turnOnLightLayer();
+        RenderSystem.activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE0);
 
         // 共通レンダリングステート設定
         RenderSystem.enableDepthTest();
@@ -823,14 +953,16 @@ public class EntityMdiManager {
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
 
-        GL20.glUseProgram(mdiProgram);
+        // バニラのシェーダーキャッシュと同期させるため ProgramManager を経由してバインド
+        com.mojang.blaze3d.shaders.ProgramManager.glUseProgram(mdiProgram);
 
         // Projection Matrix
         FloatBuffer projBuf = BufferUtils.createFloatBuffer(16);
         projMatrix.get(projBuf);
         GL20.glUniformMatrix4fv(locProjMatrix, false, projBuf);
 
-        GL30.glBindVertexArray(vao);
+        // バニラのVAOキャッシュと同期させるため GlStateManager を経由してバインド
+        com.mojang.blaze3d.platform.GlStateManager._glBindVertexArray(vao);
 
         // 各モブ種別ごとにバッチ描画を実行
         for (Map.Entry<BatchKey, List<QueuedInstance>> entry : BATCHES.entrySet()) {
@@ -912,10 +1044,19 @@ public class EntityMdiManager {
         }
 
         // 後処理
-        GL30.glBindVertexArray(0);
+        RenderSystem.activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE2);
+        net.minecraft.client.Minecraft.getInstance().gameRenderer.lightTexture().turnOffLightLayer();
+        RenderSystem.activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE0);
+        com.mojang.blaze3d.vertex.BufferUploader.reset();
+        com.mojang.blaze3d.vertex.VertexBuffer.unbind();
         GL15.glBindBuffer(GL43.GL_DRAW_INDIRECT_BUFFER, 0);
         GL15.glBindBuffer(GL43.GL_SHADER_STORAGE_BUFFER, 0);
-        GL20.glUseProgram(0);
+
+        // バニラのシェーダー管理キャッシュと同期
+        com.mojang.blaze3d.shaders.ProgramManager.glUseProgram(0);
+
+        // バニラのRenderSystemが期待するテクスチャユニット0をアクティブに戻す
+        RenderSystem.activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE0);
 
         BATCHES.clear();
     }
@@ -988,24 +1129,175 @@ public class EntityMdiManager {
         }
     }
 
+    /**
+     * EntityModel のすべての ModelPart の visible を true に強制リセットします。
+     * VillagerProfessionLayer などが hatVisible(false) で head.visible=false にしたまま終わる問題への対策。
+     * EntityModel.resetPose() が存在しない場合のフォールバックとして使用します。
+     */
+    @SuppressWarnings("unused")
+    private static void resetAllPartsVisible(net.minecraft.client.model.EntityModel<?> model) {
+        Class<?> clazz = model.getClass();
+        while (clazz != null && clazz != Object.class) {
+            for (java.lang.reflect.Field field : clazz.getDeclaredFields()) {
+                if (net.minecraft.client.model.geom.ModelPart.class.isAssignableFrom(field.getType())) {
+                    try {
+                        field.setAccessible(true);
+                        net.minecraft.client.model.geom.ModelPart part = (net.minecraft.client.model.geom.ModelPart) field.get(model);
+                        if (part != null) {
+                            setPartVisibleRecursive(part, true);
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+    }
+
+    private static void setPartVisibleRecursive(net.minecraft.client.model.geom.ModelPart part, boolean visible) {
+        part.visible = visible;
+        for (net.minecraft.client.model.geom.ModelPart child : getChildren(part).values()) {
+            setPartVisibleRecursive(child, visible);
+        }
+    }
+
+    private static final Map<Integer, net.minecraft.resources.ResourceLocation> LEVEL_LOCATIONS = Map.of(
+        1, new net.minecraft.resources.ResourceLocation("stone"),
+        2, new net.minecraft.resources.ResourceLocation("iron"),
+        3, new net.minecraft.resources.ResourceLocation("gold"),
+        4, new net.minecraft.resources.ResourceLocation("emerald"),
+        5, new net.minecraft.resources.ResourceLocation("diamond")
+    );
+
+    private static net.minecraft.resources.ResourceLocation getVillagerResourceLocation(String category, net.minecraft.resources.ResourceLocation key) {
+        return new net.minecraft.resources.ResourceLocation(key.getNamespace(), "textures/entity/villager/" + category + "/" + key.getPath() + ".png");
+    }
+
+    private static net.minecraft.resources.ResourceLocation getZombieVillagerResourceLocation(String category, net.minecraft.resources.ResourceLocation key) {
+        return new net.minecraft.resources.ResourceLocation(key.getNamespace(), "textures/entity/zombie_villager/" + category + "/" + key.getPath() + ".png");
+    }
+
     private static void invokeRendererScale(net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?> renderer,
                                              LivingEntity entity, PoseStack poseStack, float partialTick) {
-        try {
-            java.lang.reflect.Method scaleMethod = net.minecraft.client.renderer.entity.LivingEntityRenderer.class.getDeclaredMethod(
-                "m_7546_", net.minecraft.world.entity.LivingEntity.class, PoseStack.class, float.class
-            );
-            scaleMethod.setAccessible(true);
-            scaleMethod.invoke(renderer, entity, poseStack, partialTick);
-        } catch (Exception e) {
-            try {
-                java.lang.reflect.Method scaleMethod = net.minecraft.client.renderer.entity.LivingEntityRenderer.class.getDeclaredMethod(
-                    "scale", net.minecraft.world.entity.LivingEntity.class, PoseStack.class, float.class
-                );
-                scaleMethod.setAccessible(true);
-                scaleMethod.invoke(renderer, entity, poseStack, partialTick);
-            } catch (Exception e2) {
-                // fallback
+        Class<?> clazz = renderer.getClass();
+        while (clazz != null && clazz != Object.class) {
+            for (java.lang.reflect.Method method : clazz.getDeclaredMethods()) {
+                if (method.getName().equals("scale") || method.getName().equals("m_7546_")) {
+                    if (method.getParameterCount() == 3) {
+                        try {
+                            method.setAccessible(true);
+                            method.invoke(renderer, entity, poseStack, partialTick);
+                            return;
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
             }
+            clazz = clazz.getSuperclass();
+        }
+    }
+
+    /**
+     * バニラの LivingEntityRenderer.render と100%同一の姿勢変換系列を適用します。
+     * （睡眠位置オフセット、死亡演出/Dinnerbone/激流/氷漬け等の setupRotations、X/Yフリップ、固有scale、基準点調整）
+     */
+    public static void applyEntityTransforms(PoseStack poseStack,
+                                             net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?> renderer,
+                                             LivingEntity entity, float partialTick, float bodyYaw, float ageInTicks) {
+        // 1. 睡眠時のベッド基準平行移動
+        if (entity.hasPose(net.minecraft.world.entity.Pose.SLEEPING)) {
+            net.minecraft.core.Direction direction = entity.getBedOrientation();
+            if (direction != null) {
+                float eyeHeight = entity.getEyeHeight(net.minecraft.world.entity.Pose.STANDING) - 0.1f;
+                poseStack.translate((float) (-direction.getStepX()) * eyeHeight, 0.0f, (float) (-direction.getStepZ()) * eyeHeight);
+            }
+        }
+
+        // 2. setupRotations（死亡時の倒れる演出、胴体Y回転、Dinnerbone上下反転、激流、氷漬け揺れ等）
+        boolean rotationsApplied = false;
+        if (renderer != null) {
+            rotationsApplied = invokeSetupRotations(renderer, entity, poseStack, ageInTicks, bodyYaw, partialTick);
+        }
+        if (!rotationsApplied) {
+            applyFallbackRotations(entity, poseStack, ageInTicks, bodyYaw, partialTick);
+        }
+
+        // 3. X,Y軸フリップ (バニラ標準の右手系・モデル向き調整)
+        poseStack.scale(-1.0f, -1.0f, 1.0f);
+
+        // 4. レンダラー固有のスケール (スライムのサイズや子供モブのスケール等)
+        if (renderer != null) {
+            try {
+                invokeRendererScale(renderer, entity, poseStack, partialTick);
+            } catch (Exception e) {
+                if (entity instanceof net.minecraft.world.entity.AgeableMob && ((net.minecraft.world.entity.AgeableMob) entity).isBaby()) {
+                    poseStack.scale(0.5f, 0.5f, 0.5f);
+                }
+            }
+        } else if (entity instanceof net.minecraft.world.entity.AgeableMob && ((net.minecraft.world.entity.AgeableMob) entity).isBaby()) {
+            poseStack.scale(0.5f, 0.5f, 0.5f);
+        }
+
+        // 5. 基準位置調整
+        poseStack.translate(0.0f, -1.501f, 0.0f);
+    }
+
+    private static boolean invokeSetupRotations(net.minecraft.client.renderer.entity.LivingEntityRenderer<?, ?> renderer,
+                                                LivingEntity entity, PoseStack poseStack,
+                                                float ageInTicks, float bodyYaw, float partialTick) {
+        Class<?> clazz = renderer.getClass();
+        while (clazz != null && clazz != Object.class) {
+            for (java.lang.reflect.Method method : clazz.getDeclaredMethods()) {
+                if (method.getName().equals("setupRotations") || method.getName().equals("m_7523_")) {
+                    if (method.getParameterCount() == 5) {
+                        try {
+                            method.setAccessible(true);
+                            method.invoke(renderer, entity, poseStack, ageInTicks, bodyYaw, partialTick);
+                            return true;
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return false;
+    }
+
+    private static void applyFallbackRotations(LivingEntity entity, PoseStack poseStack, float ageInTicks, float bodyYaw, float partialTick) {
+        if (entity.isFullyFrozen()) {
+            bodyYaw += (float)(Math.cos((double)entity.tickCount * 3.25) * Math.PI * 0.4f);
+        }
+        if (!entity.hasPose(net.minecraft.world.entity.Pose.SLEEPING)) {
+            poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(180.0f - bodyYaw));
+        }
+        if (entity.deathTime > 0) {
+            float f = ((float)entity.deathTime + partialTick - 1.0f) / 20.0f * 1.6f;
+            if ((f = net.minecraft.util.Mth.sqrt(f)) > 1.0f) {
+                f = 1.0f;
+            }
+            poseStack.mulPose(com.mojang.math.Axis.ZP.rotationDegrees(f * 90.0f));
+        } else if (entity.isAutoSpinAttack()) {
+            poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(-90.0f - entity.getXRot()));
+            poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(((float)entity.tickCount + partialTick) * -75.0f));
+        } else if (entity.hasPose(net.minecraft.world.entity.Pose.SLEEPING)) {
+            net.minecraft.core.Direction direction = entity.getBedOrientation();
+            float f1 = direction != null ? sleepDirectionToRotation(direction) : bodyYaw;
+            poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(f1));
+            poseStack.mulPose(com.mojang.math.Axis.ZP.rotationDegrees(90.0f));
+            poseStack.mulPose(com.mojang.math.Axis.YP.rotationDegrees(270.0f));
+        } else if (net.minecraft.client.renderer.entity.LivingEntityRenderer.isEntityUpsideDown(entity)) {
+            poseStack.translate(0.0f, entity.getBbHeight() + 0.1f, 0.0f);
+            poseStack.mulPose(com.mojang.math.Axis.ZP.rotationDegrees(180.0f));
+        }
+    }
+
+    private static float sleepDirectionToRotation(net.minecraft.core.Direction direction) {
+        switch (direction) {
+            case SOUTH: return 90.0f;
+            case WEST: return 0.0f;
+            case NORTH: return 270.0f;
+            case EAST: return 180.0f;
+            default: return 0.0f;
         }
     }
 }

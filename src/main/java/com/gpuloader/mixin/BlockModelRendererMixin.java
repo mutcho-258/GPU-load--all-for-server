@@ -25,9 +25,17 @@ public abstract class BlockModelRendererMixin {
      * 注: Net.minecraft.client.renderer.block.BlockModelRenderer のメソッド構成に依存。
      * 1.20.1 では主に tesselateBlock 内部や、専用の可視性チェックメソッドが呼ばれる。
      */
-    @Inject(method = {"shouldRenderFace", "m_111066_", "m_224536_"}, at = @At("HEAD"), cancellable = true, require = 0)
-    private void onShouldRenderFace(BlockAndTintGetter level, BlockState state, BlockPos pos, Direction face, BlockPos neighborPos, CallbackInfoReturnable<Boolean> cir) {
-        if (!Config.chunkMesh || !com.gpuloader.GPUMod.initialized) return;
+    @Inject(method = { "shouldRenderFace", "m_111066_",
+            "m_224536_" }, at = @At("HEAD"), cancellable = true, require = 0)
+    private void onShouldRenderFace(BlockAndTintGetter level, BlockState state, BlockPos pos, Direction face,
+            BlockPos neighborPos, CallbackInfoReturnable<Boolean> cir) {
+        // GPUフェイスカリングによる誤カリング（ドロップアイテム、特殊ブロック等の消失バグ）を検証・防止するため
+        // 一時的に完全にバイパスしてバニラの正常判定に任せる
+        if (true)
+            return;
+
+        if (!Config.chunkMesh || !com.gpuloader.GPUMod.initialized)
+            return;
 
         // セクション内のローカル座標を算出
         int localX = pos.getX() & 15;
@@ -52,7 +60,8 @@ public abstract class BlockModelRendererMixin {
 
     /**
      * Vanillaの Direction を MeshCullTask (mesh.comp) のインデックスに変換する。
-     * mesh.comp: 0=+X(EAST), 1=-X(WEST), 2=+Y(UP), 3=-Y(DOWN), 4=+Z(SOUTH), 5=-Z(NORTH)
+     * mesh.comp: 0=+X(EAST), 1=-X(WEST), 2=+Y(UP), 3=-Y(DOWN), 4=+Z(SOUTH),
+     * 5=-Z(NORTH)
      */
     private int mapVanillaFaceToGpu(Direction face) {
         return switch (face) {
