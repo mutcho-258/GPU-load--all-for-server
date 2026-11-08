@@ -39,6 +39,14 @@ public class MobAiManager {
 
     private static int updateIndex = 0;
 
+    public static int getTrackedMobCount() {
+        return TRACKED_MOBS.size();
+    }
+
+    public static int getComputedResultCount() {
+        return RESULTS.size();
+    }
+
     // ─── GPU result (adjustment vector) ───
     public static class MobResult {
         public float dirX, dirY, dirZ;
@@ -329,48 +337,82 @@ public class MobAiManager {
         return gameTime % Config.aiComputeInterval == 0;
     }
 
+    public static class PersonalitiesConfig {
+        public Map<String, Personality> entities = new HashMap<>();
+        public Map<String, Personality> fallbacks = new HashMap<>();
+    }
+
+    private static PersonalitiesConfig configInstance = null;
+
+    public static void loadPersonalities() {
+        java.nio.file.Path configFile = net.minecraftforge.fml.loading.FMLPaths.CONFIGDIR.get().resolve("gpuloader/personalities.json");
+        try {
+            if (!java.nio.file.Files.exists(configFile.getParent())) {
+                java.nio.file.Files.createDirectories(configFile.getParent());
+            }
+            if (java.nio.file.Files.exists(configFile)) {
+                try (java.io.Reader reader = java.nio.file.Files.newBufferedReader(configFile, java.nio.charset.StandardCharsets.UTF_8)) {
+                    configInstance = new com.google.gson.Gson().fromJson(reader, PersonalitiesConfig.class);
+                }
+            }
+            if (configInstance == null) {
+                configInstance = createDefaultPersonalities();
+                try (java.io.Writer writer = java.nio.file.Files.newBufferedWriter(configFile, java.nio.charset.StandardCharsets.UTF_8)) {
+                    new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(configInstance, writer);
+                }
+            }
+        } catch (Exception e) {
+            com.mojang.logging.LogUtils.getLogger().error("Failed to load/save personalities.json, using hardcoded defaults", e);
+            configInstance = createDefaultPersonalities();
+        }
+    }
+
+    private static PersonalitiesConfig createDefaultPersonalities() {
+        PersonalitiesConfig cfg = new PersonalitiesConfig();
+        cfg.entities.put("minecraft:zombie", new Personality(1.8f, 0.1f, 0.3f, 0.5f, 40f, 0.0f, 0.6f, 1.0f, TYPE_ZOMBIE));
+        cfg.entities.put("minecraft:skeleton", new Personality(1.5f, 0.3f, 0.2f, 0.6f, 15f, 0.2f, 0.0f, 1.0f, TYPE_SKELETON));
+        cfg.entities.put("minecraft:creeper", new Personality(2.5f, 0.0f, 0.4f, 0.5f, 3f, 0.0f, 0.0f, 0.8f, TYPE_CREEPER));
+        cfg.entities.put("minecraft:spider", new Personality(1.6f, 0.1f, 0.5f, 0.7f, 16f, 0.1f, 0.3f, 0.7f, TYPE_SPIDER));
+        cfg.entities.put("minecraft:enderman", new Personality(0.3f, 0.0f, 0.8f, 1.0f, 64f, 0.0f, 0.0f, 0.5f, TYPE_ENDERMAN));
+        cfg.entities.put("minecraft:witch", new Personality(1.2f, 0.5f, 0.3f, 0.5f, 10f, 0.3f, 0.0f, 0.6f, TYPE_WITCH));
+        cfg.entities.put("minecraft:blaze", new Personality(1.8f, 0.0f, 0.2f, 0.5f, 48f, 0.0f, 0.0f, 0.5f, TYPE_BLAZE));
+        cfg.entities.put("minecraft:slime", new Personality(1.0f, 0.0f, 0.6f, 0.4f, 16f, 0.0f, 0.0f, 0.5f, TYPE_SLIME));
+        cfg.entities.put("minecraft:phantom", new Personality(2.0f, 0.0f, 0.2f, 0.9f, 32f, 0.0f, 0.5f, 1.0f, TYPE_PHANTOM));
+        cfg.entities.put("minecraft:drowned", new Personality(1.7f, 0.0f, 0.4f, 0.4f, 20f, 0.0f, 0.4f, 0.8f, TYPE_DROWNED));
+        cfg.entities.put("minecraft:guardian", new Personality(1.8f, 0.0f, 0.3f, 0.5f, 16f, 0.0f, 0.3f, 0.5f, TYPE_GUARDIAN));
+        cfg.entities.put("minecraft:villager", new Personality(0.8f, 2.0f, 0.3f, 0.5f, 0.0f, 0.5f, 0.8f, 0.0f, TYPE_VILLAGER));
+        cfg.entities.put("minecraft:iron_golem", new Personality(2.0f, 0.0f, 0.6f, 0.4f, 16f, 0.0f, 0.0f, 0.5f, TYPE_IRON_GOLEM));
+        cfg.entities.put("minecraft:wolf", new Personality(1.0f, 0.3f, 0.5f, 0.7f, 12f, 0.2f, 0.9f, 0.4f, TYPE_WOLF));
+        cfg.entities.put("minecraft:cat", new Personality(0.4f, 1.5f, 0.8f, 0.7f, 0.0f, 0.4f, 0.3f, 0.3f, TYPE_CAT));
+        cfg.entities.put("minecraft:ocelot", new Personality(0.4f, 1.5f, 0.8f, 0.7f, 0.0f, 0.4f, 0.3f, 0.3f, TYPE_CAT));
+        cfg.entities.put("minecraft:chicken", new Personality(0.3f, 1.8f, 1.0f, 0.5f, 0.0f, 0.2f, 0.5f, 0.1f, TYPE_CHICKEN));
+        cfg.entities.put("minecraft:horse", new Personality(0.3f, 1.0f, 0.7f, 0.8f, 0.0f, 0.3f, 0.6f, 0.2f, TYPE_HORSE));
+
+        cfg.fallbacks.put("water_animal", new Personality(0.2f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.5f, TYPE_WATER));
+        cfg.fallbacks.put("animal", new Personality(0.5f, 1.5f, 0.9f, 0.4f, 0.0f, 0.3f, 0.7f, 0.2f, TYPE_COW));
+        cfg.fallbacks.put("monster", new Personality(2.0f, 0.0f, 0.2f, 0.6f, 16f, 0.0f, 0.2f, 0.8f, TYPE_DEFAULT));
+        cfg.fallbacks.put("default", new Personality(0.5f, 1.2f, 0.8f, 0.4f, 0.0f, 0.0f, 0.5f, 0.5f, TYPE_DEFAULT));
+        return cfg;
+    }
+
     // ─── Personality mapping ───
     public static Personality getPersonality(Mob mob) {
-        if (mob instanceof Zombie && !(mob instanceof Drowned))
-            return new Personality(1.8f, 0.1f, 0.3f, 0.5f, 40f, 0.0f, 0.6f, 1.0f, TYPE_ZOMBIE);
-        if (mob instanceof Skeleton)
-            return new Personality(1.5f, 0.3f, 0.2f, 0.6f, 15f, 0.2f, 0.0f, 1.0f, TYPE_SKELETON);
-        if (mob instanceof Creeper)
-            return new Personality(2.5f, 0.0f, 0.4f, 0.5f, 3f, 0.0f, 0.0f, 0.8f, TYPE_CREEPER);
-        if (mob instanceof Spider)
-            return new Personality(1.6f, 0.1f, 0.5f, 0.7f, 16f, 0.1f, 0.3f, 0.7f, TYPE_SPIDER);
-        if (mob instanceof EnderMan)
-            return new Personality(0.3f, 0.0f, 0.8f, 1.0f, 64f, 0.0f, 0.0f, 0.5f, TYPE_ENDERMAN);
-        if (mob instanceof Witch)
-            return new Personality(1.2f, 0.5f, 0.3f, 0.5f, 10f, 0.3f, 0.0f, 0.6f, TYPE_WITCH);
-        if (mob instanceof Blaze)
-            return new Personality(1.8f, 0.0f, 0.2f, 0.5f, 48f, 0.0f, 0.0f, 0.5f, TYPE_BLAZE);
-        if (mob instanceof Slime)
-            return new Personality(1.0f, 0.0f, 0.6f, 0.4f, 16f, 0.0f, 0.0f, 0.5f, TYPE_SLIME);
-        if (mob instanceof Phantom)
-            return new Personality(2.0f, 0.0f, 0.2f, 0.9f, 32f, 0.0f, 0.5f, 1.0f, TYPE_PHANTOM);
-        if (mob instanceof Drowned)
-            return new Personality(1.7f, 0.0f, 0.4f, 0.4f, 20f, 0.0f, 0.4f, 0.8f, TYPE_DROWNED);
-        if (mob instanceof Guardian)
-            return new Personality(1.8f, 0.0f, 0.3f, 0.5f, 16f, 0.0f, 0.3f, 0.5f, TYPE_GUARDIAN);
-        if (mob instanceof Villager)
-            return new Personality(0.8f, 2.0f, 0.3f, 0.5f, 0.0f, 0.5f, 0.8f, 0.0f, TYPE_VILLAGER);
-        if (mob instanceof IronGolem)
-            return new Personality(2.0f, 0.0f, 0.6f, 0.4f, 16f, 0.0f, 0.0f, 0.5f, TYPE_IRON_GOLEM);
-        if (mob instanceof Wolf)
-            return new Personality(1.0f, 0.3f, 0.5f, 0.7f, 12f, 0.2f, 0.9f, 0.4f, TYPE_WOLF);
-        if (mob instanceof Cat || mob instanceof Ocelot)
-            return new Personality(0.4f, 1.5f, 0.8f, 0.7f, 0.0f, 0.4f, 0.3f, 0.3f, TYPE_CAT);
-        if (mob instanceof Chicken)
-            return new Personality(0.3f, 1.8f, 1.0f, 0.5f, 0.0f, 0.2f, 0.5f, 0.1f, TYPE_CHICKEN);
-        if (mob instanceof Horse)
-            return new Personality(0.3f, 1.0f, 0.7f, 0.8f, 0.0f, 0.3f, 0.6f, 0.2f, TYPE_HORSE);
+        if (configInstance == null) {
+            loadPersonalities();
+        }
+
+        String registryName = net.minecraft.world.entity.EntityType.getKey(mob.getType()).toString();
+        if (configInstance.entities.containsKey(registryName)) {
+            return configInstance.entities.get(registryName);
+        }
+
         if (mob instanceof WaterAnimal)
-            return new Personality(0.2f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.5f, TYPE_WATER);
+            return configInstance.fallbacks.getOrDefault("water_animal", new Personality(0.2f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.5f, TYPE_WATER));
         if (mob instanceof Animal)
-            return new Personality(0.5f, 1.5f, 0.9f, 0.4f, 0.0f, 0.3f, 0.7f, 0.2f, TYPE_COW);
+            return configInstance.fallbacks.getOrDefault("animal", new Personality(0.5f, 1.5f, 0.9f, 0.4f, 0.0f, 0.3f, 0.7f, 0.2f, TYPE_COW));
         if (mob instanceof Monster)
-            return new Personality(2.0f, 0.0f, 0.2f, 0.6f, 16f, 0.0f, 0.2f, 0.8f, TYPE_DEFAULT);
-        return new Personality(0.5f, 1.2f, 0.8f, 0.4f, 0.0f, 0.0f, 0.5f, 0.5f, TYPE_DEFAULT);
+            return configInstance.fallbacks.getOrDefault("monster", new Personality(2.0f, 0.0f, 0.2f, 0.6f, 16f, 0.0f, 0.2f, 0.8f, TYPE_DEFAULT));
+
+        return configInstance.fallbacks.getOrDefault("default", new Personality(0.5f, 1.2f, 0.8f, 0.4f, 0.0f, 0.0f, 0.5f, 0.5f, TYPE_DEFAULT));
     }
 }

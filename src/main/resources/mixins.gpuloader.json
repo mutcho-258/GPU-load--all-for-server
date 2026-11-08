@@ -9,11 +9,14 @@
     "MoveControlMixin",
     "NoiseChunkMixin",
     "NoiseInterpolatorMixin",
-    "MultiNoiseBiomeSourceMixin"
+    "MultiNoiseBiomeSourceMixin",
+    "LevelLightEngineMixin",
+    "LightEngineAccessor"
   ],
   "client": [
     "SectionRenderMixin",
-    "BlockModelRendererMixin"
+    "BlockModelRendererMixin",
+    "BufferSourceMixin"
   ],
   "injectors": {
     "defaultRequire": 0

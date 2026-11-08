@@ -8,13 +8,13 @@ import java.util.concurrent.BlockingQueue;
 /**
  * GC圧力を軽減するための配列プールクラス。
  * 7チャンネル（地形密度 + 6気候パラメータ）を収容可能なサイズに拡張。
- * Noise系: Native (Off-Heap) FloatBuffer を使用してGCを完全にバイパス。
- * Mesh/Opacity系: 小サイズのためJava int[] を使用（GC影響は無視可能）。
+ * Minecraft 1.20.1 の Overworld (height=49): 5 * 49 * 5 * 7 = 8,575 floats.
+ * 最大セル高 (height=65等) に備えて 16,384 floats を確保。
  */
 public class BufferPool {
 
-    /** ノイズ計算結果用 (5x33x5 = 825 floats * 7 channels = 5775 floats) */
-    private static final int NOISE_SIZE = 5775;
+    /** ノイズ計算結果用 (最大 5x65x5x7 = 11375 floats -> 16384 floats) */
+    private static final int NOISE_SIZE = 16384;
     private static final BlockingQueue<FloatBuffer> NOISE_POOL = new ArrayBlockingQueue<>(256);
 
     /** メッシュカリング結果用 (16x16x16 = 4096 ints) */
@@ -38,6 +38,8 @@ public class BufferPool {
             if (!NOISE_POOL.offer(buf)) {
                 MemoryUtil.memFree(buf);
             }
+        } else if (buf != null) {
+            MemoryUtil.memFree(buf);
         }
     }
 
@@ -65,13 +67,5 @@ public class BufferPool {
         if (buf != null && buf.length == OPACITY_SIZE) {
             OPACITY_POOL.offer(buf);
         }
-    }
-
-    public static void cleanup() {
-        FloatBuffer fBuf;
-        while ((fBuf = NOISE_POOL.poll()) != null) MemoryUtil.memFree(fBuf);
-
-        MESH_POOL.clear();
-        OPACITY_POOL.clear();
     }
 }

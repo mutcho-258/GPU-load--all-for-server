@@ -22,7 +22,7 @@ public class NoiseBatchManager {
     // 需要（CPUスレッドが実際に欲しがっているチャンク）のキュー
     private static final ConcurrentLinkedQueue<NoiseRequest> DEMAND_QUEUE = new ConcurrentLinkedQueue<>();
     
-    private static int currentHeight = 33;
+    private static int currentHeight = 49;
     private static int[] currentPermutation = null;
     private static final ConcurrentHashMap<ChunkPos, CachedChunk> CACHE = new ConcurrentHashMap<>();
 
@@ -35,6 +35,37 @@ public class NoiseBatchManager {
     
     private static final AtomicBoolean GATHERING = new AtomicBoolean(false);
     private static ScheduledFuture<?> pendingFlush = null;
+
+    private static int cpuFallbackSlices = 0;
+    private static final java.util.Set<String> REPORTED_TYPES = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    public static void trackCpuFallback() {
+        cpuFallbackSlices++;
+    }
+
+    public static void reportUnhandledType(String typeName) {
+        if (REPORTED_TYPES.add(typeName)) {
+            LOGGER.info("[GPU Loader] Unhandled Ocean/Terrain Noise type: {} (Falling back to CPU for this chunk)", typeName);
+        }
+    }
+
+    public static java.util.Set<String> getReportedUnhandledTypes() {
+        return REPORTED_TYPES;
+    }
+
+    public static int getCpuFallbackChunkEstimate() {
+        return cpuFallbackSlices / 5; // 1 full chunk = 5 slices (cellCountXZ + 1)
+    }
+
+    public static void updatePermutationFromVanilla(byte[] vanillaP) {
+        if (vanillaP == null || vanillaP.length < 256) return;
+        int[] p = new int[512];
+        for (int i = 0; i < 256; i++) {
+            p[i] = vanillaP[i] & 0xFF;
+            p[i + 256] = p[i];
+        }
+        currentPermutation = p;
+    }
 
     public static void updatePermutation(long seed) {
         int[] p_base = new int[256];
@@ -142,15 +173,13 @@ public class NoiseBatchManager {
             batch.add(DEMAND_QUEUE.poll());
         }
 
-        // 2. 予測(BFS)によるパディングは、無駄な計算（GPU負荷）を増やし
-        // かえって本来の要求のレスポンスを下げる可能性があるため一旦停止。
-        // 自然な需要（複数スレッドからの要求）だけでバッチを組む。
-        /*
+        // 2. 予測(BFS)による投機的パディング
+        // 空きスロットがある場合、需要チャンクの周囲を先読み計算してバッチ密度を最大化する。
+        // GPUは数チャンクでも十数チャンクでも実行時間がほぼ変わらないため、
+        // バッチを満杯にすることでGPU効率とキャッシュヒット率を飛躍的に向上させる。
         if (batch.size() < Config.terrainNoiseBatch && !batch.isEmpty()) {
-            NoiseRequest lead = batch.get(0);
-            padWithPredictions(batch, lead.chunkX, lead.chunkZ);
+            padWithPredictions(batch);
         }
-        */
 
         if (batch.isEmpty()) return;
 
@@ -166,18 +195,22 @@ public class NoiseBatchManager {
     }
 
     /**
-     * BFSを用いて隣接チャンクを予測し、バッチの空きスロットを埋める。
+     * BFSを用いて需要チャンクの隣接チャンクを先読み予測し、バッチの空きスロットを埋める。
+     * 進行方向や近傍のチャンクがGPU上で先回り計算されるため、キャッシュヒット率が劇的に向上する。
      */
-    private static void padWithPredictions(List<NoiseRequest> batch, int startX, int startZ) {
+    private static void padWithPredictions(List<NoiseRequest> batch) {
         int maxBatch = Config.terrainNoiseBatch;
+        if (batch.isEmpty() || batch.size() >= maxBatch) return;
+
         Queue<ChunkPos> queue = new LinkedList<>();
         java.util.Set<ChunkPos> visited = new java.util.HashSet<>();
 
-        // すでにバッチに入っている座標を既知とする
-        for (NoiseRequest r : batch) visited.add(new ChunkPos(r.chunkX, r.chunkZ));
-        
-        ChunkPos start = new ChunkPos(startX, startZ);
-        queue.add(start);
+        // バッチ内の全需要チャンクを起点にする
+        for (NoiseRequest r : batch) {
+            ChunkPos pos = new ChunkPos(r.chunkX, r.chunkZ);
+            visited.add(pos);
+            queue.add(pos);
+        }
 
         int[][] directions = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 } };
 
@@ -187,8 +220,7 @@ public class NoiseBatchManager {
                 if (batch.size() >= maxBatch) break;
                 ChunkPos neighbor = new ChunkPos(curr.x + dir[0], curr.z + dir[1]);
 
-                if (!visited.contains(neighbor)) {
-                    visited.add(neighbor);
+                if (visited.add(neighbor)) {
                     queue.add(neighbor);
 
                     boolean[] neighborNew = { false };
