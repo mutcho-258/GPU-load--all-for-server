@@ -74,14 +74,24 @@ public class NoiseComputeTask extends GPUTask<Void> {
     private static int loc_batch_size = -1;
     private static int loc_enable_biome = -1;
 
-    private static int terrainBatchCount = 0;
-    private static long terrainTotalLatency = 0;
-    private static int terrainTotalChunks = 0;
+    // Lifetime statistics (for /gpustat and diagnostics)
+    private static int lifetimeTotalChunks = 0;
+    private static int lifetimeBatchCount = 0;
+    private static long lifetimeTotalLatency = 0;
+
+    // Periodic 32-chunk window statistics (for debug console logging)
+    private static int windowChunks = 0;
+    private static int windowBatchCount = 0;
+    private static long windowLatency = 0;
 
     private static long terrainLastLogTime = 0;
     private static int terrain10mBatchCount = 0;
     private static long terrain10mTotalLatency = 0;
     private static int terrain10mTotalChunks = 0;
+
+    public static int getTerrainTotalChunks() { return lifetimeTotalChunks; }
+    public static int getTerrainBatchCount() { return lifetimeBatchCount; }
+    public static double getAverageLatencyMs() { return lifetimeBatchCount == 0 ? 0 : (double) lifetimeTotalLatency / lifetimeBatchCount; }
 
     public NoiseComputeTask(int batchSize, int height, List<NoiseRequest> batch, int[] permutation) {
         this.batchSize = batchSize;
@@ -176,25 +186,33 @@ public class NoiseComputeTask extends GPUTask<Void> {
                 PENDING_QUEUE.poll();
 
                 long latency = System.currentTimeMillis() - pending.submitTime;
-                terrainBatchCount++;
-                terrainTotalLatency += latency;
-                terrainTotalChunks += pending.requests.size();
+                int chunkSize = pending.requests.size();
+
+                // Update lifetime stats (never reset, used by /gpustat)
+                lifetimeBatchCount++;
+                lifetimeTotalLatency += latency;
+                lifetimeTotalChunks += chunkSize;
+
+                // Update periodic window stats
+                windowBatchCount++;
+                windowLatency += latency;
+                windowChunks += chunkSize;
                 
                 terrain10mBatchCount++;
                 terrain10mTotalLatency += latency;
-                terrain10mTotalChunks += pending.requests.size();
+                terrain10mTotalChunks += chunkSize;
 
                 long now = System.currentTimeMillis();
                 
-                // 32-chunk periodic log
-                if (terrainTotalChunks >= 32) {
+                // 32-chunk periodic log (resets only the window stats)
+                if (windowChunks >= 32) {
                     if (com.gpuloader.Config.debugTerrainNoise) {
                         LOGGER.info("[GPU Terrain] Processed {} chunks on GPU. Avg Latency {}ms, Avg Batch Size {}",
-                            terrainTotalChunks, terrainTotalLatency / terrainBatchCount, terrainTotalChunks / terrainBatchCount);
+                            windowChunks, windowLatency / windowBatchCount, windowChunks / windowBatchCount);
                     }
-                    terrainBatchCount = 0;
-                    terrainTotalLatency = 0;
-                    terrainTotalChunks = 0;
+                    windowBatchCount = 0;
+                    windowLatency = 0;
+                    windowChunks = 0;
                 }
 
                 FloatBuffer floats = mapped.asFloatBuffer();
@@ -281,6 +299,9 @@ public class NoiseComputeTask extends GPUTask<Void> {
                 req.result.completeExceptionally(new RuntimeException("Buffer size mismatch"));
             }
         }
+
+        lifetimeBatchCount++;
+        lifetimeTotalChunks += batchRequests.size();
 
         GL15.glDeleteBuffers(tempBuffer);
     }

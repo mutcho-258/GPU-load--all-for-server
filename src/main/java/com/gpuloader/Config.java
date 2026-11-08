@@ -30,6 +30,7 @@ public class Config {
         public static final ForgeConfigSpec.DoubleValue AI_POI_RANGE;
         public static final ForgeConfigSpec.DoubleValue AI_DANGER_RANGE;
         public static final ForgeConfigSpec.DoubleValue AI_GPU_BLEND_FACTOR;
+        public static final ForgeConfigSpec.BooleanValue ENABLE_GPU_LIGHTING;
 
         static {
                 // ---- Client Side Settings ----
@@ -77,7 +78,7 @@ public class Config {
 
                 COMPUTE_BATCH_GATHER_MS = SERVER_BUILDER
                                 .comment("Time in milliseconds to wait and gather chunk requests from multiple threads. (0.1 - 10.0)")
-                                .defineInRange("computeBatchGatherMs", 0.5, 0.1, 10.0);
+                                .defineInRange("computeBatchGatherMs", 1.5, 0.1, 10.0);
 
                 USE_SHARED_CONTEXT = SERVER_BUILDER
                                 .comment("Use a shared OpenGL context on a background thread to bypass render thread latency.")
@@ -110,6 +111,12 @@ public class Config {
                                 .comment("How much GPU influences mob movement. 0.0=pure vanilla, 1.0=full GPU. (0.0-0.5)")
                                 .defineInRange("aiGpuBlendFactor", 0.25, 0.0, 0.5);
                 SERVER_BUILDER.pop();
+
+                SERVER_BUILDER.push("Lighting Settings");
+                ENABLE_GPU_LIGHTING = SERVER_BUILDER
+                                .comment("Enable GPU-accelerated light propagation for chunk loading and generation.")
+                                .define("enableGpuLighting", true);
+                SERVER_BUILDER.pop();
         }
 
         public static final ForgeConfigSpec CLIENT_SPEC = CLIENT_BUILDER.build();
@@ -128,6 +135,7 @@ public class Config {
         public static double computeBatchGatherMs = 0.5;
         public static boolean useSharedContext = true;
         public static boolean gpuAi = true;
+        public static boolean gpuLighting = true;
         public static int aiUpdateBatch = 20;
         public static int aiComputeInterval = 2;
         public static double aiPoiRange = 16.0;
@@ -150,6 +158,7 @@ public class Config {
                         computeBatchGatherMs = COMPUTE_BATCH_GATHER_MS.get();
                         useSharedContext = USE_SHARED_CONTEXT.get();
                         gpuAi = ENABLE_GPU_AI.get();
+                        gpuLighting = ENABLE_GPU_LIGHTING.get();
                         aiUpdateBatch = AI_UPDATE_BATCH_SIZE.get();
                         aiComputeInterval = Math.max(1, Math.min(5, AI_COMPUTE_INTERVAL_TICKS.get()));
                         aiPoiRange = AI_POI_RANGE.get();

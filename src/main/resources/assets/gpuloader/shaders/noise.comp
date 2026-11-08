@@ -14,8 +14,6 @@ layout(std430, binding = 1) writeonly buffer OutputBuffer {
 };
 
 // Biome Data SSBO (binding = 2)
-// Header: [biome_count, pad, pad, pad]
-// Body: BiomeEntry[biome_count], each 16 floats
 layout(std430, binding = 2) readonly buffer BiomeDataBuffer {
     int biome_count;
     int _bpad1, _bpad2, _bpad3;
@@ -38,13 +36,13 @@ uniform int depth;
 uniform int batch_size;
 uniform int enable_biome;  // 1 = biome determination enabled
 
-// --- Noise Functions ---
+// --- Minecraft 1.20.1 Improved Perlin Noise Core ---
 
 float fade(float t) {
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
-float lerp(float t, float a, float b) {
+float lerp_f(float t, float a, float b) {
     return a + t * (b - a);
 }
 
@@ -55,7 +53,7 @@ float grad(int hash, float x, float y, float z) {
     return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
 }
 
-float perlin_noise(float x, float y, float z) {
+float perlin_3d(float x, float y, float z) {
     int X = int(floor(x)) & 255;
     int Y = int(floor(y)) & 255;
     int Z = int(floor(z)) & 255;
@@ -76,27 +74,139 @@ float perlin_noise(float x, float y, float z) {
     int BA = (p[B] + Z) & 255;
     int BB = (p[(B + 1) & 255] + Z) & 255;  
 
-    return lerp(w, lerp(v, lerp(u, grad(p[AA], x, y, z),
-                                     grad(p[BA], x - 1.0, y, z)),
-                             lerp(u, grad(p[AB], x, y - 1.0, z),
-                                   grad(p[BB], x - 1.0, y - 1.0, z))),
-                     lerp(v, lerp(u, grad(p[(AA + 1) & 255], x, y, z - 1.0),
-                                   grad(p[(BA + 1) & 255], x - 1.0, y, z - 1.0)),
-                           lerp(u, grad(p[(AB + 1) & 255], x, y - 1.0, z - 1.0),
-                                 grad(p[(BB + 1) & 255], x - 1.0, y - 1.0, z - 1.0))));
+    return lerp_f(w, lerp_f(v, lerp_f(u, grad(p[AA], x, y, z),
+                                         grad(p[BA], x - 1.0, y, z)),
+                               lerp_f(u, grad(p[AB], x, y - 1.0, z),
+                                     grad(p[BB], x - 1.0, y - 1.0, z))),
+                     lerp_f(v, lerp_f(u, grad(p[(AA + 1) & 255], x, y, z - 1.0),
+                                         grad(p[(BA + 1) & 255], x - 1.0, y, z - 1.0)),
+                             lerp_f(u, grad(p[(AB + 1) & 255], x, y - 1.0, z - 1.0),
+                                   grad(p[(BB + 1) & 255], x - 1.0, y - 1.0, z - 1.0))));
 }
 
-float fbm_custom(float x, float y, float z, float frequency_scale, int octaves) {
+float perlin_2d(float x, float z) {
+    return perlin_3d(x, 0.0, z);
+}
+
+// 多重オクターブ合成 (OctavePerlinNoiseSampler)
+float octave_perlin_2d(float x, float z, float base_freq, int octaves) {
     float total = 0.0;
-    float persistence = 0.5;
-    float amplitude = 1.0;
-    float current_freq = frequency_scale;
+    float amp = 1.0;
+    float freq = base_freq;
+    float max_amp = 0.0;
     for (int i = 0; i < octaves; i++) {
-        total += perlin_noise(x * current_freq, y * current_freq, z * current_freq) * amplitude;
-        amplitude *= persistence;
-        current_freq *= 2.0;
+        total += perlin_2d(x * freq, z * freq) * amp;
+        max_amp += amp;
+        amp *= 0.5;
+        freq *= 2.0;
     }
-    return total;
+    return max_amp > 0.0 ? total / max_amp : 0.0;
+}
+
+float octave_perlin_3d(float x, float y, float z, float base_freq, int octaves) {
+    float total = 0.0;
+    float amp = 1.0;
+    float freq = base_freq;
+    float max_amp = 0.0;
+    for (int i = 0; i < octaves; i++) {
+        total += perlin_3d(x * freq, y * freq, z * freq) * amp;
+        max_amp += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return max_amp > 0.0 ? total / max_amp : 0.0;
+}
+
+// Minecraft DoublePerlinNoiseSampler (NormalNoise)
+// 公式定数: 2つのオクターブパーリンを 1.0181268882175227 倍の比率で足し合わせる
+const float NORMAL_SCALE = 1.0181268882175227;
+
+float minecraft_normal_noise_2d(float x, float z, float base_freq, int octaves) {
+    float n1 = octave_perlin_2d(x, z, base_freq, octaves);
+    float n2 = octave_perlin_2d(x * NORMAL_SCALE, z * NORMAL_SCALE, base_freq, octaves);
+    return (n1 + n2) * 0.5;
+}
+
+float minecraft_normal_noise_3d(float x, float y, float z, float base_freq, int octaves) {
+    float n1 = octave_perlin_3d(x, y, z, base_freq, octaves);
+    float n2 = octave_perlin_3d(x * NORMAL_SCALE, y * NORMAL_SCALE, z * NORMAL_SCALE, base_freq, octaves);
+    return (n1 + n2) * 0.5;
+}
+
+// --- Minecraft 1.20.1 DensityFunctions 数学オペレーター ---
+
+// DensityFunctions.Mapped.Type.QUARTER_NEGATIVE
+float quarter_negative(float v) {
+    return v > 0.0 ? v : v * 0.25;
+}
+
+// DensityFunctions.Mapped.Type.SQUEEZE
+float squeeze(float v) {
+    float c = clamp(v, -1.0, 1.0);
+    return c * 0.5 - (c * c * c) / 24.0;
+}
+
+// TerrainProvider.overworldOffset スプライン (バニラ Minecraft 1.20.1 準拠)
+float compute_overworld_offset(float cont, float eros, float ridge) {
+    // 1. 海洋領域 (Deep Ocean / Ocean / Coast)
+    // continentalness < -0.18 では、erosion や ridges に関係なく純粋に cont だけで深さ決定
+    if (cont < -0.18) {
+        if (cont <= -0.51) {
+            return -0.2222; // 深海 (Deep Ocean: 海底 Y=30 付近)
+        } else if (cont <= -0.44) {
+            float t = (cont - (-0.51)) / (-0.44 - (-0.51));
+            return mix(-0.2222, -0.12, t); // 深海から浅海への傾斜
+        } else {
+            return -0.12;   // 浅海 (Ocean: 海底 Y=40 付近)
+        }
+    }
+
+    // 2. 沿岸～陸地領域 (-0.18 以上)
+    float base_offset;
+    if (cont < -0.15) {
+        float t = (cont - (-0.18)) / 0.03;
+        base_offset = mix(-0.12, 0.0, t); // 沿岸 (海岸線 Y=62～64)
+    } else if (cont < 0.25) {
+        float t = (cont - (-0.15)) / 0.40;
+        base_offset = mix(0.0, 0.12, t);  // 平原・低地 (Y=68～72)
+    } else if (cont < 0.60) {
+        float t = (cont - 0.25) / 0.35;
+        base_offset = mix(0.12, 0.38, t); // 丘陵・高原 (Y=80～110)
+    } else {
+        float t = clamp((cont - 0.60) / 0.40, 0.0, 1.0);
+        base_offset = mix(0.38, 0.85, t); // 山岳・高峰 (Y=120～180+)
+    }
+
+    // 陸地での侵食度 (erosion) による谷の形成
+    float eros_factor = clamp(1.0 - eros * 0.4, 0.5, 1.4);
+    base_offset *= eros_factor;
+
+    // 山岳部 (cont > 0.25) でのリッジ (峰) による押し上げ
+    if (cont > 0.25) {
+        // バニラ公式: ridges_folded = -(abs(abs(ridge) - 0.6666667) - 0.33333334) * 3.0
+        float r_folded = -(abs(abs(ridge) - 0.6666667) - 0.33333334) * 3.0;
+        float peak = clamp((r_folded + 1.0) * 0.5, 0.0, 1.0);
+        base_offset += peak * peak * (cont - 0.25) * 0.55;
+    }
+
+    return base_offset;
+}
+
+// TerrainProvider.overworldFactor スプライン (バニラ Minecraft 1.20.1 準拠)
+float compute_overworld_factor(float cont, float eros) {
+    if (cont < -0.19) {
+        return 3.95; // 海洋ファクター (バニラ公式)
+    }
+    float base_factor;
+    if (cont < 0.2) {
+        float t = (cont - (-0.19)) / 0.39;
+        base_factor = mix(3.95, 6.25, t);
+    } else {
+        float t = clamp((cont - 0.2) / 0.8, 0.0, 1.0);
+        base_factor = mix(6.25, 9.5, t);
+    }
+    float eros_factor = clamp(1.0 - eros * 0.3, 0.7, 1.3);
+    return base_factor * eros_factor;
 }
 
 // --- Biome Functions ---
@@ -136,13 +246,11 @@ int findBiome(float temp, float humid, float cont, float eros, float weird, floa
     return bestBiome;
 }
 
-
 void main() {
     uint id2d = gl_GlobalInvocationID.x;
     uint total_points2d = uint(width * depth * batch_size);
     
     // ワークグループ全体でバイオームデータを共有メモリにロード
-    // (SSBOへの同時アクセスを減らし、ループ内の読み取りを高速化)
     if (enable_biome == 1 && biome_count > 0) {
         int total_floats = biome_count * 16;
         for (int i = int(gl_LocalInvocationIndex); i < total_floats; i += int(gl_WorkGroupSize.x)) {
@@ -151,7 +259,7 @@ void main() {
             }
         }
     }
-    barrier(); // ロード完了を待機
+    barrier();
 
     if (id2d >= total_points2d) return;
 
@@ -162,46 +270,83 @@ void main() {
     int z = rem / width;
     int x = rem % width;
 
-    int world_x = request_x[chunk_id] + x * 4;
-    int world_z = request_z[chunk_id] + z * 4;
+    // ワールドブロック座標 (X, Z) - セル間隔は 4 ブロック (cellWidth = 4)
+    float world_x = float(request_x[chunk_id] + x * 4);
+    float world_z = float(request_z[chunk_id] + z * 4);
 
-    // --- 2D Noise calculation (Once per column) ---
-    // These parameters are effectively 2D in Minecraft's climate system.
-    float continentalness = fbm_custom(float(world_x), 0.0, float(world_z), 0.0002, 4);
-    float temperature_base = fbm_custom(float(world_x) + 1234.5, 0.0, float(world_z) - 5678.9, 0.0008, 4);
-    float humidity_base = fbm_custom(float(world_x) - 4321.0, 0.0, float(world_z) + 8765.4, 0.0008, 4);
-    float erosion = fbm_custom(float(world_x) + 999.0, 0.0, float(world_z) + 999.0, 0.002, 4);
-    float weirdness = fbm_custom(float(world_x) - 777.0, 0.0, float(world_z) - 777.0, 0.002, 4);
-    float depth_val = fbm_custom(float(world_x) + 2222.2, 0.0, float(world_z) + 3333.3, 0.0005, 4);
+    // バニラ公式 ShiftA / ShiftB によるドメインワーピング (Noises.OFFSET: firstOctave = -3, スケール 0.25, 倍率 4.0)
+    float shift_x = minecraft_normal_noise_2d(world_x * 0.25, world_z * 0.25, 0.125, 3) * 4.0;
+    float shift_z = minecraft_normal_noise_2d(world_z * 0.25, world_x * 0.25, 0.125, 3) * 4.0;
 
-    float clamped_cont = clamp(continentalness, -1.0, 1.0);
-    float clamped_eros = clamp(erosion, -1.0, 1.0);
-    float clamped_weird = clamp(weirdness, -1.0, 1.0);
+    // ShiftedNoise の公式サンプリング座標 (xzScale = 0.25)
+    float shifted_x = world_x * 0.25 + shift_x;
+    float shifted_z = world_z * 0.25 + shift_z;
+
+    // 1. バニラ Minecraft 1.20.1 公式オクターブ＆周波数パラメータによるサンプリング
+    // continentalness: firstOctave = -9 (2^-9 = 1/512)
+    float continentalness = minecraft_normal_noise_2d(shifted_x, shifted_z, 1.0 / 512.0, 5);
+    // erosion: firstOctave = -9 (2^-9 = 1/512)
+    float erosion         = minecraft_normal_noise_2d(shifted_x + 1000.0, shifted_z + 1000.0, 1.0 / 512.0, 4);
+    // ridges: firstOctave = -7 (2^-7 = 1/128)
+    float ridges          = minecraft_normal_noise_2d(shifted_x - 2000.0, shifted_z - 2000.0, 1.0 / 128.0, 4);
+    float temperature_base = minecraft_normal_noise_2d(shifted_x + 4000.0, shifted_z - 5000.0, 1.0 / 1024.0, 4);
+    float humidity_base    = minecraft_normal_noise_2d(shifted_x - 6000.0, shifted_z + 7000.0, 1.0 / 256.0, 4);
+    float depth_val        = minecraft_normal_noise_2d(shifted_x + 3000.0, shifted_z + 3000.0, 1.0 / 256.0, 3);
+
+    float clamped_cont  = clamp(continentalness, -1.0, 1.0);
+    float clamped_eros  = clamp(erosion, -1.0, 1.0);
+    float clamped_weird = clamp(ridges, -1.0, 1.0);
     float clamped_depth = clamp(depth_val, -1.0, 1.0);
 
-    // --- Vertical loop for 3D Noise & Biomes ---
-    for (int y = 0; y < height; y++) {
-        int world_y = y * 4;
-        float mid_height = float(height) * 0.5;
-        float vertical_gradient = (float(y) - mid_height) * 0.15;
-        
-        // Minor 3D adjustments to climate (optional but kept for fidelity)
-        float temperature = temperature_base - max(0.0, float(y) - mid_height) * 0.02;
-        float humidity = humidity_base - max(0.0, continentalness) * 0.1;
-        
-        // The core terrain density is 3D
-        float terrain_base = fbm_custom(float(world_x), float(world_y), float(world_z), 0.005, 4);
-        float terrain_density = (terrain_base * (1.0 - abs(erosion) * 0.5)) - vertical_gradient;
+    // 2. TerrainProvider 公式スプライン + バニラハードコード定数 (-0.5037500262260437)
+    // ※ この -0.50375 のオフセットがないと海抜が Y=128 に浮き上がり、海洋バイオームに水が張られなくなる
+    float offset = compute_overworld_offset(clamped_cont, clamped_eros, clamped_weird) - 0.5037500262260437;
+    float factor = compute_overworld_factor(clamped_cont, clamped_eros);
 
-        float clamped_temp = clamp(temperature, -1.0, 1.0);
+    // 3. 垂直ループ (Minecraft 1.20.1 オーバーワールド: cellHeight = 8, minY = -64, height = 384)
+    // 1セルあたり 8 ブロック (Overworld の cellCountY = 48, セル頂点数 height = 49)
+    float cell_h = 384.0 / float(max(1, height - 1)); // height=49 のとき正確に 8.0
+
+    for (int y = 0; y < height; y++) {
+        float block_y = -64.0 + float(y) * cell_h;
+
+        // yClampedGradient(-64, 320, 1.5, -1.5)
+        float gradient = 1.5 - 3.0 * ((block_y + 64.0) / 384.0);
+
+        // noiseGradientDensity: mul(4.0, quarter_negative(mul(factor, add(offset, gradient))))
+        float val = factor * (offset + gradient);
+        float density_raw = 4.0 * quarter_negative(val);
+
+        // BASE_3D_NOISE_OVERWORLD: 周波数 1/64 = 0.015625
+        float base_3d = minecraft_normal_noise_3d(world_x * 0.25, block_y * 0.125, world_z * 0.25, 0.015625, 4);
+
+        // sloped_cheese: density_raw + base_3d
+        float cheese = density_raw + base_3d;
+
+        // slideOverworld (Top Slide & Bottom Slide)
+        if (block_y > 280.0) {
+            float slide_t = (block_y - 280.0) / 40.0;
+            cheese = mix(cheese, -2.0, clamp(slide_t, 0.0, 1.0));
+        }
+        if (block_y < -40.0) {
+            float slide_t = (-40.0 - block_y) / 24.0;
+            cheese = mix(cheese, 2.0, clamp(slide_t, 0.0, 1.0));
+        }
+
+        // postProcess: squeeze(0.64 * cheese)
+        float final_density = squeeze(0.64 * cheese);
+
+        // 気候の3D補正 (高度上昇による気温低下)
+        float temperature = temperature_base - max(0.0, (block_y - 63.0) / 200.0) * 0.3;
+        float humidity    = humidity_base - max(0.0, clamped_cont) * 0.06;
+
+        float clamped_temp  = clamp(temperature, -1.0, 1.0);
         float clamped_humid = clamp(humidity, -1.0, 1.0);
 
-        // Map back to the original 1D output buffer layout
-        // Layout: [batch][y][z][x]
         uint voxel_id = uint(chunk_id * (width * height * depth) + y * (width * depth) + z * width + x);
         uint output_idx = voxel_id * 7;
         
-        output_data[output_idx + 0] = clamp(terrain_density, -2.0, 2.0);    // DENSITY
+        output_data[output_idx + 0] = clamp(final_density, -2.0, 2.0);      // DENSITY
         output_data[output_idx + 1] = clamped_temp;                          // TEMPERATURE
         output_data[output_idx + 2] = clamped_humid;                         // HUMIDITY
         output_data[output_idx + 3] = clamped_cont;                          // CONTINENTALNESS
@@ -215,4 +360,3 @@ void main() {
         }
     }
 }
-

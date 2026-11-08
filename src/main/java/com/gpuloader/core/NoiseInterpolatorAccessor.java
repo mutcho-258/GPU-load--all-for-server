@@ -4,7 +4,9 @@ import net.minecraft.world.level.levelgen.DensityFunction;
 import java.nio.FloatBuffer;
 
 public interface NoiseInterpolatorAccessor {
-    void setSlice1FromFloat(FloatBuffer data, int zSliceIndex);
+    void setSliceFromGpu(FloatBuffer data, boolean isSlice0, int localCellX);
+
+    double[] getSliceArray(boolean isSlice0, int zIndex);
 
     boolean shouldSubstitute();
 

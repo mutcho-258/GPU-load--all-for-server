@@ -24,6 +24,9 @@ import java.util.Map;
 public class EntityMdiManager {
     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
 
+    public static int lastFrameRenderedEntities = 0;
+    public static int lastFrameBatches = 0;
+
     private static boolean initialized = false;
     public static volatile Matrix4f cachedProjMatrix = null;
     private static int mdiProgram = -1;
@@ -964,6 +967,9 @@ public class EntityMdiManager {
         // バニラのVAOキャッシュと同期させるため GlStateManager を経由してバインド
         com.mojang.blaze3d.platform.GlStateManager._glBindVertexArray(vao);
 
+        int frameTotal = 0;
+        int batchTotal = 0;
+
         // 各モブ種別ごとにバッチ描画を実行
         for (Map.Entry<BatchKey, List<QueuedInstance>> entry : BATCHES.entrySet()) {
             BatchKey key = entry.getKey();
@@ -1041,7 +1047,13 @@ public class EntityMdiManager {
 
             // MDI 描画呼び出し
             GL43.glMultiDrawElementsIndirect(GL11.GL_TRIANGLES, GL11.GL_UNSIGNED_INT, 0, 1, 0);
+
+            frameTotal += totalInstances;
+            batchTotal++;
         }
+
+        lastFrameRenderedEntities = frameTotal;
+        lastFrameBatches = batchTotal;
 
         // 後処理
         RenderSystem.activeTexture(org.lwjgl.opengl.GL13.GL_TEXTURE2);

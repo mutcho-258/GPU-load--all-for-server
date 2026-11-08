@@ -11,10 +11,13 @@ import org.spongepowered.asm.mixin.Unique;
 @Mixin(NoiseChunk.NoiseInterpolator.class)
 public abstract class NoiseInterpolatorMixin implements NoiseInterpolatorAccessor {
 
-    @Shadow(aliases = "m_209214_")
+    @Shadow(aliases = {"slice0", "f_188828_"})
+    private double[][] slice0;
+
+    @Shadow(aliases = {"slice1", "f_188829_"})
     private double[][] slice1;
 
-    @Shadow(aliases = "m_209215_")
+    @Shadow(aliases = {"noiseFiller", "f_188830_"})
     private net.minecraft.world.level.levelgen.DensityFunction noiseFiller;
 
     @Unique
@@ -30,6 +33,7 @@ public abstract class NoiseInterpolatorMixin implements NoiseInterpolatorAccesso
         String className = noiseFiller.getClass().getSimpleName();
         return className.contains("Noise") || className.contains("ShiftedNoise")
                 || className.contains("Interpolated") || className.contains("RangeChoice")
+                || className.contains("BlendDensity")
                 || gpuIndex != -1;
     }
 
@@ -49,22 +53,39 @@ public abstract class NoiseInterpolatorMixin implements NoiseInterpolatorAccesso
     }
 
     @Override
-    public void setSlice1FromFloat(java.nio.FloatBuffer data, int zSliceIndex) {
-        if (slice1 == null || gpuIndex == -1)
+    public double[] getSliceArray(boolean isSlice0, int zIndex) {
+        double[][] target = isSlice0 ? slice0 : slice1;
+        if (target != null && zIndex >= 0 && zIndex < target.length) {
+            return target[zIndex];
+        }
+        return null;
+    }
+
+    @Override
+    public void setSliceFromGpu(java.nio.FloatBuffer data, boolean isSlice0, int localCellX) {
+        if (gpuIndex == -1 || data == null)
             return;
 
-        int width = slice1.length;
-        int height = slice1[0].length;
-        int depth = 5;
-        int pointsPerChunk = width * height * depth;
+        double[][] target = isSlice0 ? slice0 : slice1;
+        if (target == null || target.length == 0 || target[0] == null)
+            return;
 
-        int offset = gpuIndex * pointsPerChunk;
+        int depth = target.length;        // cellCountXZ + 1 (5 in full chunk)
+        int height = target[0].length;    // cellCountY + 1 (33 in full chunk)
+        int width = 5;                   // cellCountXZ + 1 (5 in full chunk)
 
-        for (int x = 0; x < width; x++) {
+        if (localCellX < 0 || localCellX >= width)
+            return;
+
+        int limit = data.limit();
+
+        for (int z = 0; z < depth; z++) {
+            double[] column = target[z];
             for (int y = 0; y < height; y++) {
-                int index = offset + (y * (width * depth) + zSliceIndex * width + x);
-                if (index < data.capacity()) {
-                    slice1[x][y] = (double) data.get(index);
+                int voxel_id = y * (width * depth) + z * width + localCellX;
+                int index = voxel_id * 7 + gpuIndex;
+                if (index >= 0 && index < limit) {
+                    column[y] = (double) data.get(index);
                 }
             }
         }

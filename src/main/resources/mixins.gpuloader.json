@@ -9,7 +9,9 @@
     "MoveControlMixin",
     "NoiseChunkMixin",
     "NoiseInterpolatorMixin",
-    "MultiNoiseBiomeSourceMixin"
+    "MultiNoiseBiomeSourceMixin",
+    "LevelLightEngineMixin",
+    "LightEngineAccessor"
   ],
   "client": [
     "SectionRenderMixin",

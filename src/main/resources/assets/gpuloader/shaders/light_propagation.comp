@@ -1,0 +1,136 @@
+#version 430 core
+
+// 8x4x8 = 256 threads per workgroup
+layout(local_size_x = 8, local_size_y = 4, local_size_z = 8) in;
+
+// Grid dimensions with 1-block padding on all 6 sides
+// Internal chunk is 16x384x16, padded grid is 18x386x18
+// X: 0..17 (size 18), Y: 0..385 (size 386), Z: 0..17 (size 18)
+uniform int grid_x; // 18
+uniform int grid_y; // 386
+uniform int grid_z; // 18
+
+// Pass type:
+// 0: Init Block Light (copy emission to light_out)
+// 1: Spread Block Light (1 Jacobi step)
+// 2: Init Sky Light (vertical ray descent from sky)
+// 3: Spread Sky Light (1 Jacobi step)
+uniform int pass_type;
+
+// Input: Block info (1 uint per voxel: upper 16-bits opacity, lower 16-bits emission)
+layout(std430, binding = 0) readonly buffer BlockInfo {
+    uint block_data[];
+};
+
+// Input Light: 1 uint per voxel (value 0-15)
+layout(std430, binding = 1) readonly buffer LightIn {
+    uint light_in[];
+};
+
+// Output Light: 1 uint per voxel (value 0-15)
+layout(std430, binding = 2) writeonly buffer LightOut {
+    uint light_out[];
+};
+
+int getIndex(int x, int y, int z) {
+    return (y * grid_x * grid_z) + (z * grid_x) + x;
+}
+
+void getBlockInfo(int x, int y, int z, out uint opacity, out uint emission) {
+    if (x < 0 || x >= grid_x || y < 0 || y >= grid_y || z < 0 || z >= grid_z) {
+        opacity = 15u;
+        emission = 0u;
+        return;
+    }
+    int idx = getIndex(x, y, z);
+    uint val = block_data[idx];
+    opacity = (val >> 16) & 0xFFFFu;
+    emission = val & 0xFFFFu;
+}
+
+uint getLight(int x, int y, int z) {
+    if (x < 0 || x >= grid_x || y < 0 || y >= grid_y || z < 0 || z >= grid_z) {
+        return 0u;
+    }
+    int idx = getIndex(x, y, z);
+    return light_in[idx];
+}
+
+void main() {
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+    if (pos.x >= grid_x || pos.y >= grid_y || pos.z >= grid_z) return;
+
+    int idx = getIndex(pos.x, pos.y, pos.z);
+
+    if (pass_type == 0) {
+        // Init Block Light: place light source emission
+        uint opacity, emission;
+        getBlockInfo(pos.x, pos.y, pos.z, opacity, emission);
+        light_out[idx] = emission;
+    } 
+    else if (pass_type == 1) {
+        // Spread Block Light (Jacobi iteration step)
+        uint opacity, emission;
+        getBlockInfo(pos.x, pos.y, pos.z, opacity, emission);
+
+        uint curLight = getLight(pos.x, pos.y, pos.z);
+        
+        // Find maximum light among 6 neighbors
+        uint lPX = getLight(pos.x + 1, pos.y, pos.z);
+        uint lNX = getLight(pos.x - 1, pos.y, pos.z);
+        uint lPY = getLight(pos.x, pos.y + 1, pos.z);
+        uint lNY = getLight(pos.x, pos.y - 1, pos.z);
+        uint lPZ = getLight(pos.x, pos.y, pos.z + 1);
+        uint lNZ = getLight(pos.x, pos.y, pos.z - 1);
+
+        uint maxNeighbor = max(max(max(lPX, lNX), max(lPY, lNY)), max(lPZ, lNZ));
+
+        // Light propagation decay: minimum 1 decay per block, plus block opacity
+        uint attenuation = max(1u, opacity);
+        uint propagated = (maxNeighbor > attenuation) ? (maxNeighbor - attenuation) : 0u;
+
+        // Final light is at least the block's own emission, or incoming propagated light
+        uint newLight = max(emission, max(curLight, propagated));
+        light_out[idx] = newLight;
+    }
+    else if (pass_type == 2) {
+        // Init Sky Light: vertical sunlight down from sky
+        // Run once per (x, z) column on y == 0
+        if (pos.y == 0) {
+            uint sun = 15u;
+            for (int y = grid_y - 1; y >= 0; --y) {
+                uint op, em;
+                getBlockInfo(pos.x, y, pos.z, op, em);
+                if (op > 0u) {
+                    sun = 0u; // Direct sunlight blocked
+                }
+                int yIdx = getIndex(pos.x, y, pos.z);
+                light_out[yIdx] = sun;
+            }
+        }
+    }
+    else if (pass_type == 3) {
+        // Spread Sky Light (Jacobi iteration step)
+        uint opacity, emission;
+        getBlockInfo(pos.x, pos.y, pos.z, opacity, emission);
+
+        uint curLight = getLight(pos.x, pos.y, pos.z);
+
+        // Sunlight directly from above doesn't decay if opacity is 0
+        uint lPY = getLight(pos.x, pos.y + 1, pos.z);
+        uint directSun = (lPY == 15u && opacity == 0u) ? 15u : 0u;
+
+        uint lPX = getLight(pos.x + 1, pos.y, pos.z);
+        uint lNX = getLight(pos.x - 1, pos.y, pos.z);
+        uint lNY = getLight(pos.x, pos.y - 1, pos.z);
+        uint lPZ = getLight(pos.x, pos.y, pos.z + 1);
+        uint lNZ = getLight(pos.x, pos.y, pos.z - 1);
+
+        uint maxNeighbor = max(max(max(lPX, lNX), max(lPY, lNY)), max(lPZ, lNZ));
+        uint attenuation = max(1u, opacity);
+        uint propagated = (maxNeighbor > attenuation) ? (maxNeighbor - attenuation) : 0u;
+
+        uint newLight = max(directSun, max(curLight, propagated));
+        light_out[idx] = newLight;
+    }
+}

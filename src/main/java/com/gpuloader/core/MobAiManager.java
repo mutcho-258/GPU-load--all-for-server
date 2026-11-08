@@ -39,6 +39,14 @@ public class MobAiManager {
 
     private static int updateIndex = 0;
 
+    public static int getTrackedMobCount() {
+        return TRACKED_MOBS.size();
+    }
+
+    public static int getComputedResultCount() {
+        return RESULTS.size();
+    }
+
     // ─── GPU result (adjustment vector) ───
     public static class MobResult {
         public float dirX, dirY, dirZ;
